@@ -124,7 +124,7 @@
     "package": "node esbuild.js --production",
     "package:install": "pnpm run package:vsix && code --install-extension $(ls -t *.vsix | head -n 1)",
     "package:vsix": "vsce package",
-    "compile-tests": "tsc -p . --outDir out",
+    "compile-tests": "node -e \"require('node:fs').rmSync('out', { recursive: true, force: true }); process.argv = [process.execPath, require.resolve('typescript/bin/tsc'), '-p', '.', '--outDir', 'out']; require('typescript/bin/tsc')\"",
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "pnpm run compile-tests && pnpm run compile && pnpm run lint",
     "lint": "oxlint src",
