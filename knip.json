@@ -12,8 +12,7 @@
     ".vscode-test.mjs"
   ],
   "ignoreBinaries": [
-    "code",
-    "vsce"
+    "code"
   ],
   "ignoreDependencies": [
     "@types/mocha",

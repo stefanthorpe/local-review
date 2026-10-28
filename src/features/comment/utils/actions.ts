@@ -19,19 +19,14 @@ export const addComment: CommentAction = async (ctx) => {
 };
 
 export const submitComments: CommentAction = async (ctx) => {
-  if (!ctx.store.hasAny()) {
-    vscode.window.showWarningMessage("No comments to submit");
+  if (!vscode.workspace.workspaceFolders?.length) {
+    vscode.window.showWarningMessage("No workspace folder found");
     return;
   }
-
-  const formattedComments = ctx.store.formatAll();
-  const success = await ctx.copyToClipboard(formattedComments);
+  const success = await ctx.copyToClipboard(
+    "Review comments are in .local-review/ — see README there",
+  );
   if (!success) {
     vscode.window.showErrorMessage("Failed to copy to clipboard");
-    return;
   }
-
-  ctx.store.clear();
-  ctx.commentProvider.clearAllThreads();
-  vscode.window.showInformationMessage("All comments copied to clipboard");
 };

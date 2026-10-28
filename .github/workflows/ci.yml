@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run compile
+      - run: pnpm run lint
+      - run: pnpm run format:check
+      - run: pnpm run knip
+      - run: pnpm run test:unit
+      - run: xvfb-run -a pnpm run test:all
+      - run: pnpm run package:vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: local-review-vsix
+          path: '*.vsix'
+          if-no-files-found: error

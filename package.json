@@ -2,7 +2,7 @@
   "name": "local-review",
   "displayName": "Local Review",
   "description": "Add comments to diff editor lines and copy to clipboard",
-  "version": "0.0.5",
+  "version": "0.1.0-stefan.1",
   "publisher": "yumazak",
   "license": "MIT",
   "repository": {
@@ -51,6 +51,18 @@
         "command": "localReview.deleteComment",
         "title": "Delete",
         "icon": "$(trash)"
+      },
+      {
+        "command": "localReview.resolve",
+        "title": "Resolve"
+      },
+      {
+        "command": "localReview.reopen",
+        "title": "Reopen"
+      },
+      {
+        "command": "localReview.reply",
+        "title": "Reply"
       }
     ],
     "keybindings": [
@@ -85,6 +97,22 @@
           "command": "localReview.deleteComment",
           "group": "inline",
           "when": "commentController == localReview && commentThread =~ /localReviewThread/"
+        },
+        {
+          "command": "localReview.resolve",
+          "group": "inline",
+          "when": "commentController == localReview && commentThread =~ /localReviewThread:open/"
+        },
+        {
+          "command": "localReview.reopen",
+          "group": "inline",
+          "when": "commentController == localReview && commentThread =~ /localReviewThread:resolved/"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "localReview.reply",
+          "when": "commentController == localReview"
         }
       ]
     }
@@ -105,7 +133,7 @@
     "format:check": "oxfmt src --check",
     "prepare": "lefthook install",
     "test": "vscode-test",
-    "test:unit": "pnpm run compile-tests && vscode-test --label unit",
+    "test:unit": "pnpm run compile-tests && node --test src/unit/*.test.cjs",
     "test:all": "pnpm run compile-tests && vscode-test",
     "knip": "knip"
   },
@@ -122,5 +150,6 @@
     "oxfmt": "^0.28.0",
     "oxlint": "^1.43.0",
     "typescript": "^5.9.3"
-  }
+  },
+  "packageManager": "pnpm@11.20.0"
 }

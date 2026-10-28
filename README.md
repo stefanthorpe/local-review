@@ -13,13 +13,13 @@ When reviewing code with AI Agents, you often need to:
 2. Collect multiple comments across different files
 3. Share all feedback in a structured format
 
-Local Review streamlines this workflow by letting you add comments directly in VS Code and copy them all at once in a format AI Agents can understand.
+Local Review streamlines this workflow by letting you add comments directly in VS Code and share persistent review threads with AI agents through files in the workspace.
 
 ## Features
 
 - Add comments to any line in the editor or diff view
 - Comments are displayed as VS Code discussion threads
-- Copy all comments to clipboard in a structured format
+- Save threads to `.local-review/` and see agent replies in the editor
 - Each comment includes filename and line number for precise reference
 
 ## Usage
@@ -34,7 +34,7 @@ Local Review streamlines this workflow by letting you add comments directly in V
 ### Copying All Comments
 
 1. Press `Cmd+Shift+Enter` (macOS) or `Ctrl+Shift+Enter` (Windows/Linux)
-2. All comments are copied to clipboard and cleared
+2. A pointer to `.local-review/` is copied to the clipboard; threads remain on disk
 
 ### Deleting a Comment
 
@@ -42,12 +42,20 @@ Click the trash icon on the comment thread to delete it.
 
 ## Output Format
 
-Comments are formatted for easy parsing by AI Agents:
+With `copyOnComment` enabled, each new comment is copied in this format:
 
 ```
 src/extension.ts:42 check the initialization
 src/utils/parser.ts:15 this logic seems duplicated
 ```
+
+## File format and agent workflow
+
+Each workspace stores threads in `.local-review/<source path>.review.json`, with a workspace-relative POSIX `file` path and `version: 1`. A thread has a unique `id`, a 1-based `line`, the trimmed line text as `anchor`, an `open` or `resolved` status, and a `comments` array. Each comment has an `id`, `author`, Markdown `body`, and ISO UTC `at` timestamp. Unknown fields are preserved.
+
+On first use the extension creates `.local-review/README.md` and offers to add the directory to `.gitignore`. Ask your agent to read that guide and the review files. It can append a comment with a unique ID, set the status to resolve or reopen a thread, or remove a thread. External edits appear in the editor. Deleting the last thread removes its review file.
+
+Threads follow matching anchor text within 50 lines; if no match is found they are marked outdated. Renaming a source file does not move its review file. Malformed or unsupported review files are skipped with a warning and are not overwritten.
 
 ## Use Cases
 
@@ -55,8 +63,8 @@ src/utils/parser.ts:15 this logic seems duplicated
 
 1. Open a diff view of changes you want to review
 2. Add comments to lines that need attention
-3. Copy all comments with `Cmd+Shift+Enter`
-4. Paste into Claude Code with your review request
+3. Ask Claude Code to read `.local-review/README.md` and the review files
+4. Read replies and resolve or reopen threads in the editor
 
 ### Collecting Feedback for AI Refactoring
 
@@ -69,7 +77,7 @@ src/utils/parser.ts:15 this logic seems duplicated
 | Command | Shortcut | Description |
 |---------|----------|-------------|
 | Local Review: Add Comment to Current Line | `Cmd+Shift+C` | Add a comment to the current line |
-| Local Review: Copy All Comments | `Cmd+Shift+Enter` | Copy all comments and clear |
+| Local Review: Copy All Comments | `Cmd+Shift+Enter` | Copy a pointer to the review files |
 
 ## Settings
 
@@ -97,5 +105,6 @@ src/utils/parser.ts:15 this logic seems duplicated
 ```bash
 pnpm install
 pnpm run compile
+pnpm run test:unit
 pnpm test
 ```
