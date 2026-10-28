@@ -17,4 +17,3 @@ copy-to-clipboard handoff.
 ## Documents
 
 - [Design](./2026-10-28-file-backed-comments-design.md)
-- [Implementation Plan](./2026-10-28-file-backed-comments-plan.md)

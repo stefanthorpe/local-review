@@ -7,7 +7,7 @@ version: 1
 **Author:** Stefan Thorpe
 **Date:** 2026-10-28
 **Status:** Approved
-**Plan:** [Implementation plan](./2026-10-28-file-backed-comments-plan.md)
+**Plan:** none separate; the Specification below is the build brief, delivered as one PR.
 
 ## Executive Summary
 
