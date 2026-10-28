@@ -4,7 +4,7 @@ import { getEditorFileName } from "../features/editor/utils/detector";
 
 suite("Extension Contribution", () => {
   suiteSetup(async () => {
-    const extension = vscode.extensions.getExtension("yumazak.local-review");
+    const extension = vscode.extensions.getExtension("stefanthorpe.local-review");
     assert.ok(extension);
     await extension.activate();
   });

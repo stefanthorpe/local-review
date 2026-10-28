@@ -1,9 +1,9 @@
 {
   "name": "local-review",
-  "displayName": "Local Review",
+  "displayName": "Local Review (file-backed)",
   "description": "Add comments to diff editor lines and copy to clipboard",
-  "version": "0.1.0-stefan.1",
-  "publisher": "yumazak",
+  "version": "0.1.0",
+  "publisher": "stefanthorpe",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -31,7 +31,7 @@
         },
         "localReview.copyOnComment": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "Automatically copy comment to clipboard when adding a new comment"
         }
       }
@@ -113,6 +113,24 @@
         {
           "command": "localReview.reply",
           "when": "commentController == localReview"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "localReview.reply",
+          "when": "false"
+        },
+        {
+          "command": "localReview.resolve",
+          "when": "false"
+        },
+        {
+          "command": "localReview.reopen",
+          "when": "false"
+        },
+        {
+          "command": "localReview.deleteComment",
+          "when": "false"
         }
       ]
     }

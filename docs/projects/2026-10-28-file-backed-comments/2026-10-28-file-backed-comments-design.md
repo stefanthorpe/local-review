@@ -1,5 +1,5 @@
 ---
-version: 1
+version: 2
 ---
 
 # File-Backed Review Comments - Architecture Design
@@ -89,7 +89,8 @@ new status. Both sides read and write the same file and nothing else.
 ### 5. Personal fork, local VSIX
 
 - **Chosen:** fork to `stefanthorpe/local-review`, build a `.vsix` in CI,
-  install it through Salt (`extras.sls`), version `0.1.0-stefan.N`.
+  install it through Salt (`extras.sls`), with extension identity
+  `stefanthorpe.local-review` and plain semver (`0.1.0`).
 - **Rejected:** RelevantSearch org fork; Marketplace publish. Both add ownership
   overhead for a personal tool. The change can still go upstream as a PR later.
 - **Cost:** updates are manual (rebuild + converge) instead of automatic.
@@ -99,9 +100,9 @@ new status. Both sides read and write the same file and nothing else.
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
 | Agent writes invalid JSON | Medium | Thread disappears from editor | Skip the file, warn with file name and parse error, never overwrite it |
-| Extension's own write triggers its watcher | High | Double render, flicker | Tag self-writes and ignore the matching watcher event |
+| Extension's own write triggers its watcher | High | Double render, flicker | Compare rendered snapshots and skip unchanged watcher events |
 | Source file renamed | Low | Review file orphaned | Out of scope for v1; orphan is visible on disk and can be moved by hand |
-| Marketplace upstream auto-updates over the fork | Medium | Fork silently replaced | Distinct version suffix; install from VSIX only |
+| Marketplace upstream auto-updates over the fork | Medium | Fork silently replaced | Distinct publisher and extension identity; install from VSIX only |
 
 ## Out of Scope
 
@@ -165,18 +166,17 @@ so an agent's annotations survive.
 
 | Component | Responsibility |
 |-----------|----------------|
-| `FileCommentStore` | Load/save review files; `addThread`, `reply`, `resolve`, `reopen`, `deleteThread`, `listForFile`, `listAll`; atomic writes (temp + rename); self-write tagging |
+| `FileCommentStore` | Load/save review files; `addThread`, `reply`, `resolve`, `reopen`, `deleteThread`, `listForFile`, `listAll`; atomic writes (temp + rename) |
 | `anchor` util | Pure function: given thread line + anchor + document lines, return re-pinned line and `outdated` flag |
 | `CommentProvider` (extended) | One VS Code comment per thread comment; native resolved state (collapsed); Reply / Resolve / Reopen / Delete actions via `comments/commentThread/*` menus |
-| Review watcher | `FileSystemWatcher` on `.local-review/**/*.review.json`; on external create/change/delete, reload that file and re-render its threads |
-| Agent README | `.local-review/README.md` written on first use: schema plus the three operations (append reply, set `status`, remove thread) |
+| Review watcher | `FileSystemWatcher` on `.local-review/**/*.review.json`; on create/change/delete, compare snapshots and update changed threads in place |
+| Agent README | `.local-review/README.md` versioned and rewritten on review writes: schema plus the three operations (append reply, set `status`, remove thread) |
 
 ## Behaviour Changes
 
-- **Copy All** (`Ctrl+Shift+Enter`) copies a one-line pointer -
-  `Review comments are in .local-review/ — see README there` - and no longer clears anything.
+- **Copy All** (`Ctrl+Shift+Enter`) copies an open-thread prompt and no longer clears anything.
 - **Add comment** writes immediately. `copyOnComment` still copies the single
-  comment in the old `path:line text` format.
+  comment in the old `path:line text` format when enabled; it defaults to false.
 - **First use** in a workspace offers to add `.local-review/` to `.gitignore`.
 
 ## Error Handling
@@ -199,6 +199,14 @@ TDD per the RS universal rules.
   file updates the rendered thread; a self-write does not double-render.
 
 ## Changelog
+
+### v2 — 2026-10-28
+
+- Use `stefanthorpe.local-review` and plain semver as the extension identity.
+- Suppress unchanged self-writes by snapshot comparison; refresh threads in place.
+- Copy All emits a prompt listing open threads.
+- Version and rewrite the agent guide; agents may resolve their own fixes.
+- Default `copyOnComment` to false.
 
 ### v1 — 2026-10-28
 

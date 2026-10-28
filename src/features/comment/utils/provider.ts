@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { FileCommentStore } from "./file-store";
+import { addReviewIgnore, FileCommentStore } from "./file-store";
 import { repin } from "./anchor";
 import { getEditorFileName } from "../../editor/utils/detector";
 import { formatStandardComment } from "./format";
@@ -14,8 +14,6 @@ export interface CommentProvider {
   dispose(): void;
 }
 
-const guide = `# Local Review files\n\nEach *.review.json file mirrors a workspace source file. It contains version 1, a workspace-relative POSIX file path, and threads with id, 1-based line, trimmed anchor, status (open or resolved), and comments. Comments have id, author, Markdown body, and ISO UTC at. Preserve existing fields.\n\nTo reply, append a comment with a unique id, your author name, body and timestamp. To resolve or reopen, set status to resolved or open. To delete, remove the thread from threads.\n`;
-
 export const createCommentProvider = (
   context: vscode.ExtensionContext,
   showCommentInput: () => Promise<CommentInputResult | undefined>,
@@ -23,12 +21,13 @@ export const createCommentProvider = (
   controller = vscode.comments.createCommentController("localReview", "Local Review"),
   registerCommands = true,
 ): CommentProvider => {
-  const threads = new Map<string, vscode.CommentThread[]>();
+  const threads = new Map<string, Map<string, vscode.CommentThread>>();
+  const timers = new Map<string, ReturnType<typeof setTimeout>>();
   const snapshots = new Map<string, string>();
   const stores = new Map<string, FileCommentStore>();
   const storeFor = (uri: vscode.Uri) => {
     const folder = vscode.workspace.getWorkspaceFolder(uri);
-    if (!folder || folder.uri.scheme !== "file") {
+    if (uri.scheme !== "file" || !folder || folder.uri.scheme !== "file") {
       return undefined;
     }
     let store = stores.get(folder.uri.fsPath);
@@ -42,7 +41,7 @@ export const createCommentProvider = (
     return { store, relative, folder };
   };
   const clear = (key: string) => {
-    for (const thread of threads.get(key) ?? []) {
+    for (const thread of threads.get(key)?.values() ?? []) {
       thread.dispose();
     }
     threads.delete(key);
@@ -52,11 +51,21 @@ export const createCommentProvider = (
       return;
     }
     const uri = editor.document.uri;
-    const info = storeFor(uri.scheme === "file" ? uri : vscode.Uri.file(uri.path));
+    const info = storeFor(uri);
     if (!info) {
       return;
     }
-    const values = info.store.listForFile(info.relative);
+    let exists = true;
+    try {
+      fs.lstatSync(
+        path.join(info.folder.uri.fsPath, ".local-review", `${info.relative}.review.json`),
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        exists = false;
+      }
+    }
+    const values = exists ? info.store.listForFile(info.relative) : [];
     const lines = Array.from(
       { length: editor.document.lineCount },
       (_, i) => editor.document.lineAt(i).text,
@@ -67,32 +76,41 @@ export const createCommentProvider = (
       return;
     }
     snapshots.set(key, snapshot);
-    clear(key);
-    const rendered: vscode.CommentThread[] = [];
+    const rendered = threads.get(key) ?? new Map<string, vscode.CommentThread>();
+    const remaining = new Set(rendered.keys());
     for (const item of values) {
       const pinned = repin(item.line, item.anchor, lines);
       const line = Math.max(0, Math.min(lines.length - 1, pinned.line - 1));
-      const thread = controller.createCommentThread(
-        uri,
-        new vscode.Range(line, 0, line, 0),
-        item.comments.map((c) => ({
-          body: new vscode.MarkdownString(c.body),
-          mode: vscode.CommentMode.Preview,
-          author: { name: c.author },
-        })),
-      );
+      const range = new vscode.Range(line, 0, line, 0);
+      const comments = item.comments.map((c) => ({
+        body: new vscode.MarkdownString(c.body),
+        mode: vscode.CommentMode.Preview,
+        author: { name: c.author },
+      }));
+      let thread = rendered.get(item.id);
+      if (!thread) {
+        thread = controller.createCommentThread(uri, range, comments);
+        rendered.set(item.id, thread);
+        thread.canReply = true;
+        thread.collapsibleState =
+          item.status === "resolved"
+            ? vscode.CommentThreadCollapsibleState.Collapsed
+            : vscode.CommentThreadCollapsibleState.Expanded;
+      } else {
+        thread.range = range;
+        thread.comments = comments;
+      }
+      remaining.delete(item.id);
       thread.label = pinned.outdated ? "Local Review (outdated)" : "Local Review";
       thread.contextValue = `localReviewThread:${item.status}:${item.id}`;
       thread.state =
         item.status === "resolved"
           ? vscode.CommentThreadState.Resolved
           : vscode.CommentThreadState.Unresolved;
-      thread.collapsibleState =
-        item.status === "resolved"
-          ? vscode.CommentThreadCollapsibleState.Collapsed
-          : vscode.CommentThreadCollapsibleState.Expanded;
-      thread.canReply = true;
-      rendered.push(thread);
+    }
+    for (const id of remaining) {
+      rendered.get(id)?.dispose();
+      rendered.delete(id);
     }
     threads.set(key, rendered);
   };
@@ -100,9 +118,12 @@ export const createCommentProvider = (
     thread: vscode.CommentThread,
     fn: (store: FileCommentStore, file: string, id: string) => void,
   ) => {
-    const uri = thread.uri.scheme === "file" ? thread.uri : vscode.Uri.file(thread.uri.path);
+    const uri = thread.uri;
     const info = storeFor(uri);
-    const id = thread.contextValue?.split(":")[2];
+    const id = thread.contextValue?.replace(/^localReviewThread:(?:open|resolved):/, "");
+    if (id === thread.contextValue) {
+      return;
+    }
     if (!info || !id) {
       return;
     }
@@ -134,6 +155,7 @@ export const createCommentProvider = (
     );
   }
   const watcher = vscode.workspace.createFileSystemWatcher("**/.local-review/**/*.review.json");
+  const folderWatcher = vscode.workspace.createFileSystemWatcher("**/.local-review");
   const onChange = () => {
     for (const editor of vscode.window.visibleTextEditors) {
       refreshForEditor(editor);
@@ -141,20 +163,30 @@ export const createCommentProvider = (
   };
   context.subscriptions.push(
     watcher,
+    folderWatcher,
+    folderWatcher.onDidDelete(onChange),
     watcher.onDidCreate(onChange),
     watcher.onDidChange(onChange),
     watcher.onDidDelete(onChange),
     vscode.workspace.onDidChangeTextDocument((e) => {
       for (const editor of vscode.window.visibleTextEditors) {
         if (editor.document === e.document) {
-          refreshForEditor(editor);
+          const key = editor.document.uri.toString();
+          clearTimeout(timers.get(key));
+          timers.set(
+            key,
+            setTimeout(() => {
+              timers.delete(key);
+              refreshForEditor(editor);
+            }, 150),
+          );
         }
       }
     }),
   );
   const startCommentAtLine = async (uri: vscode.Uri, line: number) => {
     const editor = vscode.window.activeTextEditor;
-    const info = storeFor(uri.scheme === "file" ? uri : vscode.Uri.file(uri.path));
+    const info = storeFor(uri);
     if (!info || !editor) {
       void vscode.window.showWarningMessage("No workspace folder found");
       return;
@@ -167,31 +199,20 @@ export const createCommentProvider = (
     const first = !fs.existsSync(path.join(dir, "README.md"));
     info.store.addThread(info.relative, line + 1, editor.document.lineAt(line).text, result.text);
     if (first) {
-      fs.writeFileSync(path.join(dir, "README.md"), guide, { flag: "wx" });
-      const answer = await vscode.window.showInformationMessage(
-        "Add .local-review/ to .gitignore?",
-        "Add",
-      );
-      if (answer === "Add") {
-        const ignore = path.join(info.folder.uri.fsPath, ".gitignore");
-        let content = "";
-        try {
-          content = fs.readFileSync(ignore, "utf8");
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-            throw error;
-          }
+      try {
+        const answer = await vscode.window.showInformationMessage(
+          "Add .local-review/ to .gitignore?",
+          "Add",
+        );
+        if (answer === "Add") {
+          addReviewIgnore(info.folder.uri.fsPath);
         }
-        if (!content.split(/\r?\n/).includes(".local-review/")) {
-          fs.appendFileSync(
-            ignore,
-            `${content && !content.endsWith("\n") ? "\n" : ""}.local-review/\n`,
-          );
-        }
+      } catch (error) {
+        void vscode.window.showWarningMessage(`Failed to update .gitignore: ${error}`);
       }
     }
     refreshForEditor(editor);
-    if (vscode.workspace.getConfiguration("localReview").get<boolean>("copyOnComment", true)) {
+    if (vscode.workspace.getConfiguration("localReview").get<boolean>("copyOnComment", false)) {
       await copyToClipboard(
         formatStandardComment({
           fileName: getEditorFileName(editor),
@@ -206,6 +227,10 @@ export const createCommentProvider = (
       clear(key);
     }
     snapshots.clear();
+    for (const timer of timers.values()) {
+      clearTimeout(timer);
+    }
+    timers.clear();
   };
   return {
     startCommentAtLine,
