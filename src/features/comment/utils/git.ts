@@ -69,11 +69,24 @@ export const ownGitDir = async (root: string): Promise<string | undefined> => {
 };
 
 // Whether the folder has a `.git` entry of any kind, valid or not.
-export const hasDotGit = (root: string): boolean => {
+const hasDotGit = (root: string): boolean => {
   try {
     fs.lstatSync(path.join(root, ".git"));
     return true;
   } catch (error) {
     return (error as { code?: unknown }).code !== "ENOENT";
   }
+};
+
+// Whether a failed git command means "there is no repository here": exit 128 with git's
+// "(or any of the parent directories)" wording, for a folder with no `.git` entry of its own.
+// The `not a git repository: <path>` wording means git found a `.git`, possibly in an ancestor,
+// and rejected it, which is a broken repository and never "no repository".
+export const isNoRepository = (root: string, error: unknown): boolean => {
+  const { code, stderr } = error as { code?: unknown; stderr?: unknown };
+  return (
+    code === 128 &&
+    /not a git repository \(or any of the parent directories\)/i.test(String(stderr ?? "")) &&
+    !hasDotGit(root)
+  );
 };

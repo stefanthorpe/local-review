@@ -295,3 +295,28 @@ for (const [label, plantGit] of [
     }
   });
 }
+
+test("a folder with no .git whose parent has a broken .git file gets no prompt and no .gitignore", async () => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "provider-parent-")));
+  try {
+    const parent = path.join(home, "ws");
+    const child = path.join(parent, "child");
+    fs.mkdirSync(child, { recursive: true });
+    fs.writeFileSync(path.join(parent, ".git"), "gitdir: /elsewhere\n");
+    fs.writeFileSync(path.join(child, "a.ts"), "line\n");
+    const seen = [];
+    await withHome(home, () =>
+      withProvider(
+        async ({ provider, editor, prompts }) => {
+          await provider.startCommentAtLine(editor.document.uri, 0);
+          seen.push(prompts);
+        },
+        { root: child, filePath: path.join(child, "a.ts"), input: "x", answer: "Add" },
+      ),
+    );
+    assert.deepEqual(seen, [[]]);
+    assert.equal(fs.existsSync(path.join(child, ".gitignore")), false);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});

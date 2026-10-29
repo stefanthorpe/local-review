@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { addGitExclude, addReviewIgnore, FileCommentStore } from "./file-store";
-import { hasDotGit, ownGitDir, runGit } from "./git";
+import { isNoRepository, ownGitDir, runGit } from "./git";
 import { repin } from "./anchor";
 import { isUnderGitHome, resolveRoot } from "./root";
 import { getEditorFileName } from "../../editor/utils/detector";
@@ -356,14 +356,9 @@ export const createCommentProvider = (
         await runGit(root, ["check-ignore", "-q", ".local-review/"]);
         return;
       } catch (error) {
-        const { code, stderr } = error as { code?: unknown; stderr?: unknown };
-        if (code === 1) {
+        if ((error as { code?: unknown }).code === 1) {
           route = "exclude";
-        } else if (
-          code === 128 &&
-          /not a git repository/i.test(String(stderr ?? "")) &&
-          !hasDotGit(root)
-        ) {
+        } else if (isNoRepository(root, error)) {
           route = "gitignore";
         } else {
           return;

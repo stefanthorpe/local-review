@@ -626,3 +626,25 @@ for (const [label, plant] of [
     }
   });
 }
+
+test("a folder with no .git whose parent has a broken .git file is could not verify", async () => {
+  const parent = tmp("actions-parent-");
+  try {
+    const { FileCommentStore } = require(OUT + "file-store");
+    const child = path.join(parent, "child");
+    fs.mkdirSync(child);
+    fs.writeFileSync(path.join(parent, ".git"), "gitdir: /elsewhere\n");
+    new FileCommentStore(child).addThread("a", 1, "a", "child thread");
+    fs.writeFileSync(path.join(child, ".local-review", "README.md"), "planted guide\n");
+    await withSubmit([child], ({ clipboard, warnings }) => {
+      assert.equal(clipboard.length, 0);
+      assert.match(warnings[0], /could not verify/);
+    });
+    assert.equal(
+      fs.readFileSync(path.join(child, ".local-review", "README.md"), "utf8"),
+      "planted guide\n",
+    );
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
