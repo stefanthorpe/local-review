@@ -1,6 +1,10 @@
 .vscode/**
 .vscode-test/**
 .claude/**
+docs/**
+.github/**
+src/unit/**
+pnpm-workspace.yaml
 out/**
 node_modules/**
 src/**

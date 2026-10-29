@@ -3,6 +3,11 @@ import * as vscode from "vscode";
 import { getEditorFileName } from "../features/editor/utils/detector";
 
 suite("Extension Contribution", () => {
+  suiteSetup(async () => {
+    const extension = vscode.extensions.getExtension("stefanthorpe.local-review");
+    assert.ok(extension);
+    await extension.activate();
+  });
   test("registers the add comment command", async () => {
     const commands = await vscode.commands.getCommands(true);
     assert.ok(commands.includes("local-review.addComment"));

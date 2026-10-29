@@ -1,9 +1,9 @@
 {
   "name": "local-review",
-  "displayName": "Local Review",
+  "displayName": "Local Review (file-backed)",
   "description": "Add comments to diff editor lines and copy to clipboard",
-  "version": "0.0.5",
-  "publisher": "yumazak",
+  "version": "0.1.0",
+  "publisher": "stefanthorpe",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -31,7 +31,7 @@
         },
         "localReview.copyOnComment": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "Automatically copy comment to clipboard when adding a new comment"
         }
       }
@@ -51,6 +51,18 @@
         "command": "localReview.deleteComment",
         "title": "Delete",
         "icon": "$(trash)"
+      },
+      {
+        "command": "localReview.resolve",
+        "title": "Resolve"
+      },
+      {
+        "command": "localReview.reopen",
+        "title": "Reopen"
+      },
+      {
+        "command": "localReview.reply",
+        "title": "Reply"
       }
     ],
     "keybindings": [
@@ -85,6 +97,40 @@
           "command": "localReview.deleteComment",
           "group": "inline",
           "when": "commentController == localReview && commentThread =~ /localReviewThread/"
+        },
+        {
+          "command": "localReview.resolve",
+          "group": "inline",
+          "when": "commentController == localReview && commentThread =~ /localReviewThread:open/"
+        },
+        {
+          "command": "localReview.reopen",
+          "group": "inline",
+          "when": "commentController == localReview && commentThread =~ /localReviewThread:resolved/"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "localReview.reply",
+          "when": "commentController == localReview"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "localReview.reply",
+          "when": "false"
+        },
+        {
+          "command": "localReview.resolve",
+          "when": "false"
+        },
+        {
+          "command": "localReview.reopen",
+          "when": "false"
+        },
+        {
+          "command": "localReview.deleteComment",
+          "when": "false"
         }
       ]
     }
@@ -96,7 +142,7 @@
     "package": "node esbuild.js --production",
     "package:install": "pnpm run package:vsix && code --install-extension $(ls -t *.vsix | head -n 1)",
     "package:vsix": "vsce package",
-    "compile-tests": "tsc -p . --outDir out",
+    "compile-tests": "node -e \"require('node:fs').rmSync('out', { recursive: true, force: true }); process.argv = [process.execPath, require.resolve('typescript/bin/tsc'), '-p', '.', '--outDir', 'out']; require('typescript/bin/tsc')\"",
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "pnpm run compile-tests && pnpm run compile && pnpm run lint",
     "lint": "oxlint src",
@@ -105,7 +151,7 @@
     "format:check": "oxfmt src --check",
     "prepare": "lefthook install",
     "test": "vscode-test",
-    "test:unit": "pnpm run compile-tests && vscode-test --label unit",
+    "test:unit": "pnpm run compile-tests && node --test src/unit/*.test.cjs",
     "test:all": "pnpm run compile-tests && vscode-test",
     "knip": "knip"
   },
@@ -122,5 +168,6 @@
     "oxfmt": "^0.28.0",
     "oxlint": "^1.43.0",
     "typescript": "^5.9.3"
-  }
+  },
+  "packageManager": "pnpm@11.20.0"
 }
