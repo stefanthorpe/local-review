@@ -28,17 +28,31 @@ export const submitComments: CommentAction = async (ctx) => {
   const folders = vscode.workspace.workspaceFolders.filter(
     (folder) => folder.uri.scheme === "file",
   );
-  const prompt = formatOpenThreads(
-    folders.map((folder) => ({
-      name: folder.name,
-      files: new FileCommentStore(
-        folder.uri.fsPath,
-        (message) => void vscode.window.showWarningMessage(message),
-      ).listAll(),
-    })),
-  );
+  const problems: string[] = [];
+  const collect = (message: string) => problems.push(message);
+  const reviewed = folders.map((folder) => {
+    const store = new FileCommentStore(folder.uri.fsPath, collect);
+    const files = store.listAll();
+    if (files.some((file) => file.threads.length)) {
+      // The prompt tells the agent to trust this folder's README, and a cloned repo can
+      // ship its own, so make it the canonical guide first or leave the folder out.
+      try {
+        store.ensureGuide();
+      } catch (error) {
+        problems.push(`Skipped ${folder.name}: cannot install the Local Review guide: ${error}`);
+        return { name: folder.name, files: [] };
+      }
+    }
+    return { name: folder.name, files };
+  });
+  if (problems.length) {
+    void vscode.window.showWarningMessage(
+      `${problems.length} Local Review ${problems.length === 1 ? "problem" : "problems"}; first: ${problems[0]}`,
+    );
+  }
+  const prompt = formatOpenThreads(reviewed);
   if (!prompt) {
-    void vscode.window.showInformationMessage("No open review threads found");
+    void vscode.window.showInformationMessage("No review threads need the agent");
     return;
   }
   const success = await ctx.copyToClipboard(prompt);

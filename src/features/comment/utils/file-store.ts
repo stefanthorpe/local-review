@@ -25,6 +25,9 @@ interface ReviewFile {
 }
 // Thread ids reach an AI prompt (Copy All) and review files can come from a cloned repo.
 export const THREAD_ID_PATTERN = /^[A-Za-z0-9_:.-]{1,64}$/;
+// A thread needs the agent when it is open and the user spoke last.
+export const needsAgent = (thread: { status: string; comments: { author?: string }[] }): boolean =>
+  thread.status === "open" && thread.comments.at(-1)?.author === "user";
 const id = (prefix: string) => `${prefix}_${randomBytes(12).toString("hex")}`;
 export function addReviewIgnore(root: string): void {
   const name = path.join(root, ".gitignore");
@@ -66,12 +69,14 @@ export function addReviewIgnore(root: string): void {
     fs.closeSync(fd);
   }
 }
-const guide = `<!-- local-review guide v2 -->
+const guide = `<!-- local-review guide v3 -->
 # Local Review agent guide
 
 The .local-review folder is hidden and usually gitignored, so default search may miss it.
-List files with \`find .local-review -name '*.review.json'\` and look for \`"status": "open"\`.
+List files with \`find .local-review -name '*.review.json'\`.
 The path .local-review/src/a.ts.review.json maps to src/a.ts.
+A thread needs you when its status is "open" and the last comment's author is "user".
+An open thread whose last comment is yours is waiting for the user; leave it alone.
 
 Example .local-review/src/extension.ts.review.json:
 \`\`\`json
@@ -89,13 +94,18 @@ Example .local-review/src/extension.ts.review.json:
 \`\`\`
 
 Reply by appending to comments: \`{"id":"c_<unique>","author":"<your agent name>","body":"...","at":"<ISO 8601 UTC>"}\`.
+Comment bodies render as Markdown.
 All four comment fields are required. Version must be integer 1, file must equal the mapped path,
-and the file must be UTF-8 without a BOM; otherwise the whole file is refused.
-Thread ids must be unique within a file. Do not change line or anchor; the extension re-pins them.
+and the file must be UTF-8 without a BOM. Thread ids must be unique within a file and match
+\`^[A-Za-z0-9_:.-]{1,64}$\`; one bad id, or any other schema error, makes the extension refuse the whole file.
+\`line\` is where the comment was made and goes stale as code changes: locate the code by its
+\`anchor\` text near that line. Do not change \`line\` or \`anchor\`.
 Resolve by setting status to "resolved" once the requested change is made; agents may resolve their own fixes.
 Reopen by setting status to "open". Delete only when the user asks: remove the thread object,
 and delete the file if it was the last thread. Re-read the file immediately before writing it
 to avoid losing a reply made meanwhile. Preserve other fields.
+After writing, check the file still parses and has the required fields:
+\`node -e "const d=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));if(d.version!==1||!Array.isArray(d.threads))process.exit(1)" <file>\`
 `;
 
 export class FileCommentStore {
@@ -234,12 +244,12 @@ export class FileCommentStore {
       throw failure instanceof Error ? failure : new Error(String(failure));
     }
     try {
-      this.writeGuide();
+      this.ensureGuide();
     } catch (error) {
       this.warn(`Failed to write Local Review guide: ${error}`);
     }
   }
-  private writeGuide(): void {
+  ensureGuide(): void {
     const name = path.join(this.root, ".local-review", "README.md");
     let flags = fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK;
     try {
@@ -301,9 +311,13 @@ export class FileCommentStore {
     this.save(data);
   }
   reply(file: string, threadId: string, author: string, body: string): void {
-    this.change(file, threadId, (t) =>
-      t.comments.push({ id: id("c"), author, body, at: new Date().toISOString() }),
-    );
+    this.change(file, threadId, (t) => {
+      t.comments.push({ id: id("c"), author, body, at: new Date().toISOString() });
+      // A follow-up from the user brings a resolved thread back to the agent.
+      if (author === "user") {
+        t.status = "open";
+      }
+    });
   }
   resolve(file: string, threadId: string): void {
     this.change(file, threadId, (t) => {
