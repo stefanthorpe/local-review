@@ -1,10 +1,9 @@
-import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { promisify } from "node:util";
 import * as vscode from "vscode";
 import type { CommentAction } from "../types/context";
 import { getCurrentLineInfo } from "../../editor/utils/detector";
+import { runGit } from "./git";
 import { repin } from "./anchor";
 import { FileCommentStore } from "./file-store";
 import { formatOpenThreads } from "./format";
@@ -25,22 +24,20 @@ export const addComment: CommentAction = async (ctx) => {
   await ctx.commentProvider.startCommentAtLine(editor.document.uri, lineInfo.lineNumber);
 };
 
-const execFileAsync = promisify(execFile);
 const MAX_SOURCE_BYTES = 5 * 1024 * 1024;
 
 // Whether git tracks review files in this folder. Tracked files came from a commit, so they
 // may be someone else's, and the "user" author is unverified. A missing git, a folder that
 // is not a repository or a timeout all count as untracked.
 const hasTrackedReviews = async (root: string): Promise<boolean> => {
-  const env = Object.fromEntries(
-    Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")),
-  );
   try {
-    const { stdout } = await execFileAsync(
-      "git",
-      ["--literal-pathspecs", "ls-files", "-z", "--", ".local-review"],
-      { cwd: root, env, timeout: 5000, maxBuffer: 16 * 1024 * 1024 },
-    );
+    const { stdout } = await runGit(root, [
+      "--literal-pathspecs",
+      "ls-files",
+      "-z",
+      "--",
+      ".local-review",
+    ]);
     return stdout.split("\0").some((name) => name.endsWith(".review.json"));
   } catch {
     return false;

@@ -49,8 +49,7 @@ const inNodeModules = (dir: string): boolean => dir.split(path.sep).includes("no
 // has no root and nothing can be stored for it.
 //
 // Accepted limit: a `.git` that is dangling or unreadable (existsSync is false) is skipped, so the
-// walk climbs to the parent repository instead. The POSIX path separator is assumed throughout
-// the tests; Windows is not exercised.
+// walk climbs to the parent repository instead.
 export const resolveRoot = (
   filePath: string,
   home: string,

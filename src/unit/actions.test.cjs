@@ -280,3 +280,24 @@ test("Copy All with no folders and no known roots explains where comments are sa
     ]);
   });
 });
+
+test("Copy All never runs a repo-local core.fsmonitor command while checking tracked files", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "actions-fsm-"));
+  const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "actions-marker-")), "ran");
+  try {
+    const { FileCommentStore } = require(OUT + "file-store");
+    git(root, "init", "-q");
+    new FileCommentStore(root).addThread("a", 1, "a", "fix this");
+    git(root, "add", "--", ".local-review/a.review.json");
+    git(root, "config", "core.fsmonitor", `touch ${marker}`);
+    await withSubmit([root], ({ clipboard, warnings }) => {
+      assert.equal(clipboard.length, 1);
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0], /tracked by git/);
+    });
+    assert.equal(fs.existsSync(marker), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(path.dirname(marker), { recursive: true, force: true });
+  }
+});
