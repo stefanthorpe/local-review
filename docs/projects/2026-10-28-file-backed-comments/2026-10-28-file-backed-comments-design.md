@@ -230,6 +230,11 @@ TDD per the RS universal rules.
 - Copy All installs the canonical guide before emitting its prompt (guide v3: needs-agent
   rule, id pattern, `line` is where the comment was made and `anchor` locates the code,
   self-check command, Markdown bodies).
+- The prompt names the exact guide path of each folder whose guide was installed and
+  omits folders that were skipped; its untrusted-text markers carry a per-prompt random
+  nonce so review text cannot forge them. Review paths with control characters or shell
+  metacharacters are ignored by `listAll` and the prompt, and the guide (v4) tells agents
+  to quote paths and quotes the self-check path.
 - Record the residual prompt-injection risk from thread bodies (see Risks).
 - A refused file keeps rendered threads and the user's typed text.
 
