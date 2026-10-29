@@ -89,3 +89,23 @@ test("copy-all omits a folder whose guide cannot be installed and warns once wit
     fs.rmSync(good, { recursive: true, force: true });
   }
 });
+
+test("Copy All lists threads on app/[slug]/page.tsx, app/(group)/layout.tsx and src/it's.ts, each path quoted", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "actions-"));
+  try {
+    const { FileCommentStore } = require(OUT + "file-store");
+    const store = new FileCommentStore(root);
+    for (const file of ["app/[slug]/page.tsx", "app/(group)/layout.tsx", "src/it's.ts"]) {
+      store.addThread(file, 1, "x", `fix ${file}`);
+    }
+    await withSubmit([root], ({ clipboard }) => {
+      assert.equal(clipboard.length, 1);
+      assert.ok(clipboard[0].includes("- 'app/[slug]/page.tsx' line 1 "));
+      assert.ok(clipboard[0].includes("- 'app/(group)/layout.tsx' line 1 "));
+      assert.ok(clipboard[0].includes("- 'src/it'\\''s.ts' line 1 "));
+      assert.match(clipboard[0], /^Address the 3 open review threads\./);
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

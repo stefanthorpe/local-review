@@ -28,9 +28,10 @@ export const THREAD_ID_PATTERN = /^[A-Za-z0-9_:.-]{1,64}$/;
 // A thread needs the agent when it is open and the user spoke last.
 export const needsAgent = (thread: { status: string; comments: { author?: string }[] }): boolean =>
   thread.status === "open" && thread.comments.at(-1)?.author === "user";
-// Review paths end up in prompts and shell commands, so refuse control characters and
-// shell metacharacters (spaces are allowed; the guide tells agents to quote paths).
-const UNSAFE_PATH = /[\p{Cc}`$;&|<>(){}*?!\\"'#~[\]]/u;
+// Review paths end up in prompts, which quote every path for the shell, so only control
+// characters (which can break a prompt line) are refused. Framework paths such as
+// app/[slug]/page.tsx or src/it's.ts are ordinary and must work.
+const UNSAFE_PATH = /\p{Cc}/u;
 export const isSafePath = (value: string) => !UNSAFE_PATH.test(value);
 const show = (value: unknown) => JSON.stringify(value)?.slice(0, 80);
 // The first reason a review file is refused, naming the thread index so it can be fixed.
@@ -175,7 +176,7 @@ export class FileCommentStore {
     if (
       !file ||
       path.isAbsolute(file) ||
-      file.includes("\0") ||
+      !isSafePath(file) ||
       file.split(/[\\/]/).some((part) => part === ".." || part === "." || !part)
     ) {
       throw new Error(`Invalid source path: ${file}`);
