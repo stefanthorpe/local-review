@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import type { CommentAction } from "../types/context";
@@ -6,7 +7,7 @@ import { getCurrentLineInfo } from "../../editor/utils/detector";
 import { discoverReviewRoots } from "./discover";
 import { runGit } from "./git";
 import { repin } from "./anchor";
-import { FileCommentStore } from "./file-store";
+import { FileCommentStore, isSafePath } from "./file-store";
 import { formatOpenThreads } from "./format";
 
 export const addComment: CommentAction = async (ctx) => {
@@ -27,10 +28,13 @@ export const addComment: CommentAction = async (ctx) => {
 
 const MAX_SOURCE_BYTES = 5 * 1024 * 1024;
 
-// Whether git tracks review files in this folder. Tracked files came from a commit, so they
-// may be someone else's, and the "user" author is unverified. A missing git, a folder that
-// is not a repository or a timeout all count as untracked.
-const hasTrackedReviews = async (root: string): Promise<boolean> => {
+type Tracking = "tracked" | "untracked" | "unknown";
+
+// Whether git tracks anything in this folder's `.local-review/`. Tracked files came from a
+// commit, so they may be someone else's, and so may the README the prompt points at. Only
+// git's own "not a git repository" answer counts as untracked; a missing git, a timeout, a
+// refusal such as dubious ownership or any other failure is unknown, never assumed safe.
+const trackingOf = async (root: string): Promise<Tracking> => {
   try {
     const { stdout } = await runGit(root, [
       "--literal-pathspecs",
@@ -39,9 +43,12 @@ const hasTrackedReviews = async (root: string): Promise<boolean> => {
       "--",
       ".local-review",
     ]);
-    return stdout.split("\0").some((name) => name.endsWith(".review.json"));
-  } catch {
-    return false;
+    return stdout.split("\0").some(Boolean) ? "tracked" : "untracked";
+  } catch (error) {
+    const { code, stderr } = error as { code?: unknown; stderr?: unknown };
+    return code === 128 && /not a git repository/i.test(String(stderr ?? ""))
+      ? "untracked"
+      : "unknown";
   }
 };
 
@@ -59,44 +66,60 @@ const sourceLines = (root: string, file: string): string[] | undefined => {
   }
 };
 
+// The real path, or undefined when the folder does not exist.
+const realOf = (dir: string): string | undefined => {
+  try {
+    return fs.realpathSync(dir);
+  } catch {
+    return undefined;
+  }
+};
+
 export const submitComments: CommentAction = async (ctx) => {
-  // Workspace folders, repositories found under them, roots remembered from earlier sessions and
-  // every root opened this session (roots under ~/git need not be open folders), deduplicated by
-  // real path. Discovery and the remembered list are what make Copy All work after a reload.
+  // Every place threads can live: the open folders, the repositories under them, the
+  // repositories under ~/git (so Copy All sees what the agents' own search sees), and the roots
+  // used this session. Deduplicated by real path.
+  const problems: string[] = [];
   const workspaces = (vscode.workspace.workspaceFolders ?? []).filter(
     (folder) => folder.uri.scheme === "file",
   );
+  const gitHome = realOf(path.join(os.homedir(), "git"));
+  const starts = [...(gitHome ? [gitHome] : []), ...workspaces.map((folder) => folder.uri.fsPath)];
   const discovered = (
-    await Promise.all(workspaces.map((folder) => discoverReviewRoots(folder.uri.fsPath)))
+    await Promise.all(
+      starts.map(async (start) => {
+        const { roots, stoppedAfter } = await discoverReviewRoots(start);
+        if (stoppedAfter !== undefined) {
+          problems.push(`stopped searching ${start} after ${stoppedAfter} folders`);
+        }
+        return roots;
+      }),
+    )
   ).flat();
   const candidates = [
     ...workspaces.map((folder) => ({ name: folder.name, root: folder.uri.fsPath })),
-    ...[...discovered, ...ctx.commentProvider.persistedRoots(), ...ctx.commentProvider.roots()].map(
-      (root) => ({ name: path.basename(root), root }),
-    ),
+    ...[...discovered, ...ctx.commentProvider.roots()].map((root) => ({
+      name: path.basename(root),
+      root,
+    })),
   ];
   const seen = new Set<string>();
   const folders = candidates.filter(({ root }) => {
-    let real = root;
-    try {
-      real = fs.realpathSync(root);
-    } catch {
-      // A root that no longer exists is still listed once, by its own path.
-    }
+    const real = realOf(root) ?? root;
     if (seen.has(real)) {
       return false;
     }
     seen.add(real);
     return true;
   });
-  if (!folders.length) {
+  if (!folders.length && !problems.length) {
     vscode.window.showWarningMessage(
       "Comments are only saved for files under ~/git or the open folder.",
     );
     return;
   }
   const guideProblems: string[] = [];
-  const problems: string[] = [];
+  const skipped: { root: string; reason: string }[] = [];
   const collect = (message: string) => problems.push(message);
   const reviewed = [];
   for (const folder of folders) {
@@ -107,6 +130,25 @@ export const submitComments: CommentAction = async (ctx) => {
       reviewed.push({ name: folder.name, root, files });
       continue;
     }
+    if (!isSafePath(root)) {
+      problems.push(
+        `Skipped ${folder.name}: its path ${JSON.stringify(root)} has characters that are unsafe to put in a prompt`,
+      );
+      continue;
+    }
+    // A tracked or unverifiable folder may hold someone else's files, so nothing is written
+    // there and its threads stay out of the prompt. This runs before the guide is installed.
+    const tracking = await trackingOf(root);
+    if (tracking !== "untracked") {
+      const reason = tracking === "tracked" ? "tracked by git" : "could not verify";
+      skipped.push({ root, reason });
+      problems.push(
+        tracking === "tracked"
+          ? `Skipped ${folder.name}: .local-review/ is tracked by git, so these threads may not be yours`
+          : `Skipped ${folder.name}: could not verify whether git tracks .local-review/`,
+      );
+      continue;
+    }
     // The prompt points the agent at this folder's README, and a cloned repo can ship its
     // own, so make it the canonical guide first or leave the folder out of the prompt.
     try {
@@ -115,11 +157,6 @@ export const submitComments: CommentAction = async (ctx) => {
       guideProblems.push(`Skipped ${folder.name}: cannot install the Local Review guide: ${error}`);
       reviewed.push({ name: folder.name, root, files: [] });
       continue;
-    }
-    if (await hasTrackedReviews(root)) {
-      problems.push(
-        `.local-review/ in ${folder.name} is tracked by git, so these threads may not be yours; check them before acting`,
-      );
     }
     // Line numbers are re-pinned for this prompt only; the review files are never rewritten.
     const pinned = files.map((file) => {
@@ -140,17 +177,16 @@ export const submitComments: CommentAction = async (ctx) => {
     });
   }
   const all = [...guideProblems, ...problems];
-  const prompt = formatOpenThreads(reviewed);
+  const prompt = formatOpenThreads(reviewed, skipped);
+  const summary = `${all.length} Local Review ${all.length === 1 ? "problem" : "problems"}: ${all.join(" | ")}`;
   if (!prompt && guideProblems.length) {
     void vscode.window.showWarningMessage(
-      `Nothing copied: ${guideProblems.length} ${guideProblems.length === 1 ? "folder skipped" : "folders skipped"} because the Local Review guide cannot be installed. ${guideProblems[0]}`,
+      `Nothing copied: ${guideProblems.length} ${guideProblems.length === 1 ? "folder skipped" : "folders skipped"} because the Local Review guide cannot be installed. ${all.join(" | ")}`,
     );
     return;
   }
   if (all.length) {
-    void vscode.window.showWarningMessage(
-      `${all.length} Local Review ${all.length === 1 ? "problem" : "problems"}; first: ${all[0]}`,
-    );
+    void vscode.window.showWarningMessage(summary);
   }
   if (!prompt) {
     void vscode.window.showInformationMessage("No review threads need the agent");
