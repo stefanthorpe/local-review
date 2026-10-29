@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { addReviewIgnore, FileCommentStore } from "./file-store";
 import { repin } from "./anchor";
 import { getEditorFileName } from "../../editor/utils/detector";
@@ -24,7 +25,11 @@ export const createCommentProvider = (
   const threads = new Map<string, Map<string, vscode.CommentThread>>();
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   const snapshots = new Map<string, string>();
-  const dirWatchers = new Map<string, fs.FSWatcher>();
+  // One direct watch per directory, shared by the open documents (keys) that rely on it.
+  const dirWatchers = new Map<
+    string,
+    { watcher: fs.FSWatcher; ino: number | undefined; keys: Set<string> }
+  >();
   let dirTimer: ReturnType<typeof setTimeout> | undefined;
   const stores = new Map<string, FileCommentStore>();
   const storeFor = (uri: vscode.Uri) => {
@@ -48,28 +53,71 @@ export const createCommentProvider = (
     }
     threads.delete(key);
   };
+  const inodeOf = (dir: string) => {
+    try {
+      return fs.statSync(dir).ino;
+    } catch {
+      return undefined;
+    }
+  };
+  const closeDirWatcher = (dir: string) => {
+    dirWatchers.get(dir)?.watcher.close();
+    dirWatchers.delete(dir);
+  };
   // VS Code's recursive watcher can miss writes inside a directory created moments
   // earlier (the new subtree is not watched yet), so each directory that holds a
-  // rendered review file also gets a direct, non-recursive watch.
-  const watchDirectory = (dir: string) => {
-    if (dirWatchers.has(dir)) {
-      return;
+  // rendered review file (or could soon hold one) also gets a direct, non-recursive
+  // watch. On Linux a watch on a deleted directory goes quiet without an error, so an
+  // entry whose directory is gone or has been replaced is closed and re-armed.
+  const watchDirectory = (dir: string, key: string) => {
+    const existing = dirWatchers.get(dir);
+    if (existing) {
+      if (existing.ino !== undefined && inodeOf(dir) === existing.ino) {
+        existing.keys.add(key);
+        return;
+      }
+      closeDirWatcher(dir);
     }
     try {
+      const ino = inodeOf(dir);
       const watcher = fs.watch(dir, () => {
+        if (inodeOf(dir) !== ino) {
+          closeDirWatcher(dir);
+        }
         clearTimeout(dirTimer);
         dirTimer = setTimeout(() => {
           dirTimer = undefined;
           onChange();
         }, 50);
       });
-      watcher.on("error", () => {
-        watcher.close();
-        dirWatchers.delete(dir);
-      });
-      dirWatchers.set(dir, watcher);
+      watcher.on("error", () => closeDirWatcher(dir));
+      dirWatchers.set(dir, { watcher, ino, keys: new Set([key]) });
     } catch {
       // The directory vanished or cannot be watched; the VS Code watcher still applies.
+    }
+  };
+  // The directory to watch for a review file: its own folder once it exists, otherwise the
+  // nearest existing ancestor below (or at) .local-review, so a first agent-made file is seen.
+  const watchTarget = (reviewFile: string, base: string) => {
+    for (let dir = path.dirname(reviewFile); ; dir = path.dirname(dir)) {
+      if (inodeOf(dir) !== undefined) {
+        return dir;
+      }
+      if (dir === base || dir === path.dirname(dir)) {
+        return undefined;
+      }
+    }
+  };
+  const forget = (key: string) => {
+    clear(key);
+    snapshots.delete(key);
+    clearTimeout(timers.get(key));
+    timers.delete(key);
+    for (const [dir, entry] of dirWatchers) {
+      entry.keys.delete(key);
+      if (!entry.keys.size) {
+        closeDirWatcher(dir);
+      }
     }
   };
   const refreshForEditor = (editor?: vscode.TextEditor) => {
@@ -87,9 +135,14 @@ export const createCommentProvider = (
       ".local-review",
       `${info.relative}.review.json`,
     );
+    const key = uri.toString();
+    const base = path.join(info.folder.uri.fsPath, ".local-review");
+    const target = watchTarget(reviewFile, base);
+    if (target) {
+      watchDirectory(target, key);
+    }
     try {
       fs.lstatSync(reviewFile);
-      watchDirectory(path.dirname(reviewFile));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         exists = false;
@@ -100,8 +153,9 @@ export const createCommentProvider = (
       { length: editor.document.lineCount },
       (_, i) => editor.document.lineAt(i).text,
     );
-    const key = uri.toString();
-    const snapshot = JSON.stringify([values, lines]);
+    const snapshot = createHash("sha256")
+      .update(JSON.stringify([values, lines]))
+      .digest("hex");
     if (snapshots.get(key) === snapshot) {
       return;
     }
@@ -194,6 +248,7 @@ export const createCommentProvider = (
   context.subscriptions.push(
     watcher,
     folderWatcher,
+    vscode.workspace.onDidCloseTextDocument((document) => forget(document.uri.toString())),
     folderWatcher.onDidDelete(onChange),
     watcher.onDidCreate(onChange),
     watcher.onDidChange(onChange),
@@ -263,8 +318,8 @@ export const createCommentProvider = (
     timers.clear();
     clearTimeout(dirTimer);
     dirTimer = undefined;
-    for (const dirWatcher of dirWatchers.values()) {
-      dirWatcher.close();
+    for (const entry of dirWatchers.values()) {
+      entry.watcher.close();
     }
     dirWatchers.clear();
   };
