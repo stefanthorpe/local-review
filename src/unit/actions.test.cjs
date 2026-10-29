@@ -6,8 +6,9 @@ const path = require("node:path");
 const Module = require("node:module");
 
 const OUT = "../../out/features/comment/utils/";
+const { execFileSync } = require("node:child_process");
 
-const withSubmit = async (folders, body) => {
+const withSubmit = async (folders, body, copyResult = true) => {
   const warnings = [];
   const infos = [];
   const clipboard = [];
@@ -34,7 +35,7 @@ const withSubmit = async (folders, body) => {
     await submitComments({
       copyToClipboard: async (text) => {
         clipboard.push(text);
-        return true;
+        return copyResult;
       },
     });
     body({ warnings, infos, clipboard });
@@ -107,5 +108,105 @@ test("Copy All lists threads on app/[slug]/page.tsx, app/(group)/layout.tsx and 
     });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a folder whose guide cannot be installed is reported as skipped, never as nothing to do", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "actions-"));
+  try {
+    const { FileCommentStore } = require(OUT + "file-store");
+    new FileCommentStore(root).addThread("a", 1, "a", "fix this");
+    const readme = path.join(root, ".local-review", "README.md");
+    fs.rmSync(readme);
+    fs.mkdirSync(readme);
+    await withSubmit([root], ({ clipboard, infos, warnings }) => {
+      assert.equal(clipboard.length, 0);
+      assert.deepEqual(infos, []);
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0], /1 folder skipped/);
+      assert.match(warnings[0], /guide/);
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("guide failures lead the problem summary ahead of unreadable review files", async () => {
+  const bad = fs.mkdtempSync(path.join(os.tmpdir(), "actions-bad-"));
+  const good = fs.mkdtempSync(path.join(os.tmpdir(), "actions-good-"));
+  try {
+    const { FileCommentStore } = require(OUT + "file-store");
+    new FileCommentStore(good).addThread("b", 1, "b", "good");
+    fs.writeFileSync(path.join(good, ".local-review", "c.review.json"), "{broken");
+    new FileCommentStore(bad).addThread("a", 1, "a", "bad");
+    const readme = path.join(bad, ".local-review", "README.md");
+    fs.rmSync(readme);
+    fs.mkdirSync(readme);
+    await withSubmit([good, bad], ({ warnings }) => {
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0], /^2 Local Review problems; first: Skipped w1/);
+    });
+  } finally {
+    fs.rmSync(bad, { recursive: true, force: true });
+    fs.rmSync(good, { recursive: true, force: true });
+  }
+});
+
+test("Copy All re-pins line numbers for the prompt only and persists nothing", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "actions-"));
+  try {
+    const { FileCommentStore } = require(OUT + "file-store");
+    const store = new FileCommentStore(root);
+    store.addThread("a.ts", 1, "target line", "moved");
+    store.addThread("b.ts", 1, "gone line", "stale");
+    store.addThread("c.ts", 2, "no source", "unreadable");
+    fs.writeFileSync(path.join(root, "a.ts"), "x\r\ny\r\n  target line  \r\n");
+    fs.writeFileSync(path.join(root, "b.ts"), "nothing here\n");
+    const names = ["a.ts", "b.ts", "c.ts"].map((f) => store.reviewPath(f));
+    const before = names.map((n) => fs.readFileSync(n, "utf8"));
+    await withSubmit([root], ({ clipboard }) => {
+      assert.match(clipboard[0], /- 'a\.ts' line 3 \[/);
+      assert.match(clipboard[0], /- 'b\.ts' line 1 \(outdated\) \[/);
+      assert.match(clipboard[0], /- 'c\.ts' line 2 \[/);
+    });
+    assert.deepEqual(
+      names.map((n) => fs.readFileSync(n, "utf8")),
+      before,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+const git = (cwd, ...args) => {
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")),
+  );
+  execFileSync("git", args, { cwd, env, stdio: "ignore" });
+};
+
+test("Copy All warns when review files are tracked by git but still copies the prompt", async () => {
+  const tracked = fs.mkdtempSync(path.join(os.tmpdir(), "actions-git-"));
+  const ignored = fs.mkdtempSync(path.join(os.tmpdir(), "actions-git-"));
+  try {
+    const { FileCommentStore } = require(OUT + "file-store");
+    for (const root of [tracked, ignored]) {
+      git(root, "init", "-q");
+      new FileCommentStore(root).addThread("a", 1, "a", "fix this");
+    }
+    git(tracked, "add", "--", ".local-review/a.review.json");
+    await withSubmit([ignored], ({ clipboard, warnings }) => {
+      assert.equal(clipboard.length, 1);
+      assert.deepEqual(warnings, []);
+    });
+    await withSubmit([tracked], ({ clipboard, warnings }) => {
+      assert.equal(clipboard.length, 1);
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0], /tracked by git/);
+      assert.match(warnings[0], /may not be yours/);
+    });
+  } finally {
+    fs.rmSync(tracked, { recursive: true, force: true });
+    fs.rmSync(ignored, { recursive: true, force: true });
   }
 });
