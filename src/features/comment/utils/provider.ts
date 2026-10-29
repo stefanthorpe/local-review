@@ -24,6 +24,8 @@ export const createCommentProvider = (
   const threads = new Map<string, Map<string, vscode.CommentThread>>();
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   const snapshots = new Map<string, string>();
+  const dirWatchers = new Map<string, fs.FSWatcher>();
+  let dirTimer: ReturnType<typeof setTimeout> | undefined;
   const stores = new Map<string, FileCommentStore>();
   const storeFor = (uri: vscode.Uri) => {
     const folder = vscode.workspace.getWorkspaceFolder(uri);
@@ -46,6 +48,30 @@ export const createCommentProvider = (
     }
     threads.delete(key);
   };
+  // VS Code's recursive watcher can miss writes inside a directory created moments
+  // earlier (the new subtree is not watched yet), so each directory that holds a
+  // rendered review file also gets a direct, non-recursive watch.
+  const watchDirectory = (dir: string) => {
+    if (dirWatchers.has(dir)) {
+      return;
+    }
+    try {
+      const watcher = fs.watch(dir, () => {
+        clearTimeout(dirTimer);
+        dirTimer = setTimeout(() => {
+          dirTimer = undefined;
+          onChange();
+        }, 50);
+      });
+      watcher.on("error", () => {
+        watcher.close();
+        dirWatchers.delete(dir);
+      });
+      dirWatchers.set(dir, watcher);
+    } catch {
+      // The directory vanished or cannot be watched; the VS Code watcher still applies.
+    }
+  };
   const refreshForEditor = (editor?: vscode.TextEditor) => {
     if (!editor) {
       return;
@@ -56,10 +82,14 @@ export const createCommentProvider = (
       return;
     }
     let exists = true;
+    const reviewFile = path.join(
+      info.folder.uri.fsPath,
+      ".local-review",
+      `${info.relative}.review.json`,
+    );
     try {
-      fs.lstatSync(
-        path.join(info.folder.uri.fsPath, ".local-review", `${info.relative}.review.json`),
-      );
+      fs.lstatSync(reviewFile);
+      watchDirectory(path.dirname(reviewFile));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         exists = false;
@@ -156,11 +186,11 @@ export const createCommentProvider = (
   }
   const watcher = vscode.workspace.createFileSystemWatcher("**/.local-review/**/*.review.json");
   const folderWatcher = vscode.workspace.createFileSystemWatcher("**/.local-review");
-  const onChange = () => {
+  function onChange() {
     for (const editor of vscode.window.visibleTextEditors) {
       refreshForEditor(editor);
     }
-  };
+  }
   context.subscriptions.push(
     watcher,
     folderWatcher,
@@ -231,6 +261,12 @@ export const createCommentProvider = (
       clearTimeout(timer);
     }
     timers.clear();
+    clearTimeout(dirTimer);
+    dirTimer = undefined;
+    for (const dirWatcher of dirWatchers.values()) {
+      dirWatcher.close();
+    }
+    dirWatchers.clear();
   };
   return {
     startCommentAtLine,
