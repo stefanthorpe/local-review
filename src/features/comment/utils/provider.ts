@@ -3,9 +3,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
-import { addReviewIgnore, FileCommentStore } from "./file-store";
+import { addGitExclude, addReviewIgnore, FileCommentStore } from "./file-store";
+import { runGit } from "./git";
 import { repin } from "./anchor";
-import { resolveRoot } from "./root";
+import { isUnderGitHome, resolveRoot } from "./root";
 import { getEditorFileName } from "../../editor/utils/detector";
 import { formatStandardComment } from "./format";
 import type { CommentInputResult } from "./input";
@@ -15,8 +16,16 @@ export interface CommentProvider {
   refreshForEditor(editor?: vscode.TextEditor): void;
   clearAllThreads(): void;
   roots(): string[];
+  persistedRoots(): string[];
   dispose(): void;
 }
+
+const KNOWN_ROOTS_KEY = "localReview.knownRoots";
+const SAVE_FIRST = "Save the file first; comments are stored next to saved files.";
+const NOT_IN_REPO =
+  "Comments are saved in the git repository that holds the file; this file under ~/git is not in one.";
+const NOT_STORABLE =
+  "Comments are only saved for files in a git repository under ~/git, or under the open folder.";
 
 export const createCommentProvider = (
   context: vscode.ExtensionContext,
@@ -35,6 +44,30 @@ export const createCommentProvider = (
   >();
   let dirTimer: ReturnType<typeof setTimeout> | undefined;
   const stores = new Map<string, FileCommentStore>();
+  // Roots that fell back to the workspace folder because no repository holds the file; they go
+  // when that folder is closed, while repository roots stay for the session.
+  const fallbackRoots = new Set<string>();
+  const storedRoots = (): string[] => {
+    const value = context.globalState.get<unknown>(KNOWN_ROOTS_KEY, []);
+    return Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === "string")
+      : [];
+  };
+  // Remembers a root a comment was written under, so Copy All finds its threads after a reload.
+  const remember = (root: string) => {
+    const known = storedRoots();
+    if (!known.includes(root)) {
+      void context.globalState.update(KNOWN_ROOTS_KEY, [...known, root]);
+    }
+  };
+  const persistedRoots = (): string[] => {
+    const known = storedRoots();
+    const alive = known.filter((root) => fs.existsSync(path.join(root, ".local-review")));
+    if (alive.length !== known.length) {
+      void context.globalState.update(KNOWN_ROOTS_KEY, alive);
+    }
+    return alive;
+  };
   const storeFor = (uri: vscode.Uri) => {
     if (uri.scheme !== "file") {
       return undefined;
@@ -50,6 +83,12 @@ export const createCommentProvider = (
     }
     let store = stores.get(resolved.root);
     if (!store) {
+      if (
+        resolved.root === folder?.uri.fsPath &&
+        !fs.existsSync(path.join(resolved.root, ".git"))
+      ) {
+        fallbackRoots.add(resolved.root);
+      }
       store = new FileCommentStore(resolved.root, (message) => {
         void vscode.window.showWarningMessage(message);
       });
@@ -253,6 +292,7 @@ export const createCommentProvider = (
     }
     try {
       fn(info.store, info.relative, id);
+      remember(info.root);
       for (const editor of vscode.window.visibleTextEditors) {
         if (editor.document.uri.toString() === thread.uri.toString()) {
           refreshForEditor(editor);
@@ -293,6 +333,13 @@ export const createCommentProvider = (
     watcher,
     folderWatcher,
     vscode.workspace.onDidCloseTextDocument((document) => forget(document.uri.toString())),
+    vscode.workspace.onDidChangeWorkspaceFolders((event) => {
+      for (const folder of event.removed) {
+        if (fallbackRoots.delete(folder.uri.fsPath)) {
+          stores.delete(folder.uri.fsPath);
+        }
+      }
+    }),
     folderWatcher.onDidCreate(onChange),
     folderWatcher.onDidDelete(onChange),
     watcher.onDidCreate(onChange),
@@ -314,6 +361,44 @@ export const createCommentProvider = (
       }
     }),
   );
+  // Offers to keep `.local-review/` out of version control. In a repository it asks only when git
+  // does not already ignore it, and writes the repo-private exclude file rather than a tracked
+  // .gitignore; a folder with no repository keeps the .gitignore route.
+  const offerIgnore = async (root: string) => {
+    const name = path.basename(root);
+    try {
+      if (!fs.existsSync(path.join(root, ".git"))) {
+        const answer = await vscode.window.showInformationMessage(
+          `Add .local-review/ to .gitignore in ${name}?`,
+          "Add",
+        );
+        if (answer === "Add") {
+          addReviewIgnore(root);
+        }
+        return;
+      }
+      try {
+        await runGit(root, ["check-ignore", "-q", ".local-review/"]);
+        return;
+      } catch (error) {
+        // Exit 1 means not ignored. Anything else (no git, not a repository) leaves it unknown,
+        // and an unknown state is not worth a prompt.
+        if ((error as { code?: unknown }).code !== 1) {
+          return;
+        }
+      }
+      const answer = await vscode.window.showInformationMessage(
+        `Ignore .local-review/ in ${name}?`,
+        "Add",
+      );
+      if (answer === "Add") {
+        const { stdout } = await runGit(root, ["rev-parse", "--git-common-dir"]);
+        addGitExclude(path.resolve(root, stdout.replace(/\r?\n$/, "")));
+      }
+    } catch (error) {
+      void vscode.window.showWarningMessage(`Failed to update the ignore rules: ${error}`);
+    }
+  };
   const startCommentAtLine = async (uri: vscode.Uri, line: number) => {
     const editor = vscode.window.activeTextEditor;
     if (uri.scheme === "git" || uri.scheme === "diff") {
@@ -325,7 +410,11 @@ export const createCommentProvider = (
     const info = storeFor(uri);
     if (!info || !editor) {
       void vscode.window.showWarningMessage(
-        "Comments are only saved for files under ~/git or the open folder.",
+        !editor || uri.scheme !== "file"
+          ? SAVE_FIRST
+          : isUnderGitHome(uri.fsPath, os.homedir())
+            ? NOT_IN_REPO
+            : NOT_STORABLE,
       );
       return;
     }
@@ -341,18 +430,9 @@ export const createCommentProvider = (
       await keepText(error, result.text);
       return;
     }
+    remember(info.root);
     if (first) {
-      try {
-        const answer = await vscode.window.showInformationMessage(
-          "Add .local-review/ to .gitignore?",
-          "Add",
-        );
-        if (answer === "Add") {
-          addReviewIgnore(info.root);
-        }
-      } catch (error) {
-        void vscode.window.showWarningMessage(`Failed to update .gitignore: ${error}`);
-      }
+      await offerIgnore(info.root);
     }
     refreshForEditor(editor);
     if (vscode.workspace.getConfiguration("localReview").get<boolean>("copyOnComment", false)) {
@@ -386,6 +466,7 @@ export const createCommentProvider = (
     refreshForEditor,
     clearAllThreads,
     roots: () => [...stores.keys()],
+    persistedRoots,
     dispose: () => {
       clearAllThreads();
       controller.dispose();

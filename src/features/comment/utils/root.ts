@@ -42,6 +42,10 @@ const relativeInside = (parent: string, child: string): string | undefined => {
 // git would run that repo's config for us, so such a folder is never a root.
 const inNodeModules = (dir: string): boolean => dir.split(path.sep).includes("node_modules");
 
+// Whether `filePath` lies under `<home>/git`, judged by real paths like resolveRoot.
+export const isUnderGitHome = (filePath: string, home: string): boolean =>
+  relativeInside(realLoose(path.join(home, "git")), realLoose(filePath)) !== undefined;
+
 // Picks the folder that owns a file's `.local-review` directory. Under `<home>/git` that is the
 // nearest ancestor holding a `.git` entry (a directory, or a file for worktrees), so each clone
 // and worktree gets its own root whatever folder VS Code has open. Anywhere else, or when no

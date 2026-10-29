@@ -49,6 +49,7 @@ test("provider preserves threads, deduplicates warnings, handles colon ids and f
         return disposable();
       },
       onDidCloseTextDocument: disposable,
+      onDidChangeWorkspaceFolders: disposable,
     },
     window: {
       visibleTextEditors: [editor],
@@ -102,7 +103,7 @@ test("provider preserves threads, deduplicates warnings, handles colon ids and f
     fs.writeFileSync(review, JSON.stringify(data));
     const subscriptions = [];
     const provider = createCommentProvider(
-      { subscriptions },
+      { subscriptions, globalState: { get: (_k, d) => d, update: async () => {} } },
       async () => undefined,
       async () => true,
       controller,
@@ -164,6 +165,7 @@ test("provider re-renders an external write even when the VS Code watcher stays 
       createFileSystemWatcher: () => silent,
       onDidChangeTextDocument: disposable,
       onDidCloseTextDocument: disposable,
+      onDidChangeWorkspaceFolders: disposable,
     },
     window: { visibleTextEditors: [editor], activeTextEditor: editor, showWarningMessage() {} },
     commands: { registerCommand: disposable },
@@ -198,7 +200,7 @@ test("provider re-renders an external write even when the VS Code watcher stays 
     const store = new FileCommentStore(root);
     store.addThread("sub/a", 1, "line", "body");
     provider = createCommentProvider(
-      { subscriptions: [] },
+      { subscriptions: [], globalState: { get: (_k, d) => d, update: async () => {} } },
       async () => undefined,
       async () => true,
       controller,

@@ -42,14 +42,14 @@ test("a ~/git file with no workspace folder saves to <repo>/.local-review/<rel>.
   );
 });
 
-test("a file outside ~/git and every workspace folder is refused with the new message", async () => {
+test("a file outside ~/git and every workspace folder is refused with the general message", async () => {
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), "provider-outside-"));
   try {
     await withProvider(
       async ({ provider, editor, warnings }) => {
         await provider.startCommentAtLine(editor.document.uri, 0);
         assert.deepEqual(warnings, [
-          "Comments are only saved for files under ~/git or the open folder.",
+          "Comments are only saved for files in a git repository under ~/git, or under the open folder.",
         ]);
         assert.deepEqual(provider.roots(), []);
       },

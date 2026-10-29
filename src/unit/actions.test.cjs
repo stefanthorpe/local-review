@@ -8,7 +8,7 @@ const Module = require("node:module");
 const OUT = "../../out/features/comment/utils/";
 const { execFileSync } = require("node:child_process");
 
-const withSubmit = async (folders, body, copyResult = true, knownRoots = []) => {
+const withSubmit = async (folders, body, copyResult = true, knownRoots = [], persisted = []) => {
   const warnings = [];
   const infos = [];
   const clipboard = [];
@@ -33,7 +33,7 @@ const withSubmit = async (folders, body, copyResult = true, knownRoots = []) => 
     delete require.cache[require.resolve(OUT + "actions")];
     const { submitComments } = require(OUT + "actions");
     await submitComments({
-      commentProvider: { roots: () => knownRoots },
+      commentProvider: { roots: () => knownRoots, persistedRoots: () => persisted },
       copyToClipboard: async (text) => {
         clipboard.push(text);
         return copyResult;
@@ -299,5 +299,89 @@ test("Copy All never runs a repo-local core.fsmonitor command while checking tra
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(path.dirname(marker), { recursive: true, force: true });
+  }
+});
+
+const tmp = (prefix) => fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+
+test("Copy All finds nested repos' threads by discovery when no store was opened this session", async () => {
+  const work = tmp("actions-disc-");
+  try {
+    const { FileCommentStore } = require(OUT + "file-store");
+    const child = path.join(work, "child");
+    const worktree = path.join(work, "wt");
+    const deep = path.join(work, "a", "b", "c", "d");
+    fs.mkdirSync(path.join(child, ".git"), { recursive: true });
+    fs.mkdirSync(worktree);
+    fs.writeFileSync(path.join(worktree, ".git"), "gitdir: /elsewhere\n");
+    fs.mkdirSync(path.join(deep, ".git"), { recursive: true });
+    new FileCommentStore(child).addThread("a", 1, "a", "child thread");
+    new FileCommentStore(worktree).addThread("a", 1, "a", "worktree thread");
+    new FileCommentStore(deep).addThread("a", 1, "a", "depth four thread");
+    new FileCommentStore(work).addThread("a", 1, "a", "workspace thread");
+    await withSubmit([work], ({ clipboard }) => {
+      assert.equal(clipboard.length, 1);
+      for (const text of [
+        "child thread",
+        "worktree thread",
+        "depth four thread",
+        "workspace thread",
+      ]) {
+        assert.match(clipboard[0], new RegExp(text));
+      }
+    });
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("discovery skips node_modules, .venv and .git, ignores non-repo folders, is depth bounded and never follows symlinks", async () => {
+  const work = tmp("actions-prune-");
+  const outside = tmp("actions-outside-");
+  try {
+    const { FileCommentStore } = require(OUT + "file-store");
+    const planted = [
+      path.join(work, "node_modules", "x"),
+      path.join(work, ".venv", "lib"),
+      path.join(work, "plain"),
+      path.join(work, "a", "b", "c", "d", "e"),
+    ];
+    for (const dir of planted) {
+      fs.mkdirSync(path.join(dir, ".git"), { recursive: true });
+      new FileCommentStore(dir).addThread("a", 1, "a", "must not be found");
+    }
+    fs.rmSync(path.join(work, "plain", ".git"), { recursive: true });
+    fs.mkdirSync(path.join(outside, ".git"));
+    new FileCommentStore(outside).addThread("a", 1, "a", "behind a symlink");
+    fs.symlinkSync(outside, path.join(work, "link"));
+    await withSubmit([work], ({ clipboard, infos }) => {
+      assert.equal(clipboard.length, 0);
+      assert.deepEqual(infos, ["No review threads need the agent"]);
+    });
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("Copy All includes persisted roots outside the workspace", async () => {
+  const work = tmp("actions-pw-");
+  const elsewhere = tmp("actions-pe-");
+  try {
+    const { FileCommentStore } = require(OUT + "file-store");
+    new FileCommentStore(elsewhere).addThread("a", 1, "a", "persisted elsewhere");
+    await withSubmit(
+      [work],
+      ({ clipboard }) => {
+        assert.equal(clipboard.length, 1);
+        assert.match(clipboard[0], /persisted elsewhere/);
+      },
+      true,
+      [],
+      [elsewhere],
+    );
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+    fs.rmSync(elsewhere, { recursive: true, force: true });
   }
 });

@@ -3,6 +3,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import type { CommentAction } from "../types/context";
 import { getCurrentLineInfo } from "../../editor/utils/detector";
+import { discoverReviewRoots } from "./discover";
 import { runGit } from "./git";
 import { repin } from "./anchor";
 import { FileCommentStore } from "./file-store";
@@ -59,13 +60,20 @@ const sourceLines = (root: string, file: string): string[] | undefined => {
 };
 
 export const submitComments: CommentAction = async (ctx) => {
-  // Workspace folders plus every root the provider stored comments in this session (roots
-  // under ~/git need not be open folders), deduplicated by real path.
+  // Workspace folders, repositories found under them, roots remembered from earlier sessions and
+  // every root opened this session (roots under ~/git need not be open folders), deduplicated by
+  // real path. Discovery and the remembered list are what make Copy All work after a reload.
+  const workspaces = (vscode.workspace.workspaceFolders ?? []).filter(
+    (folder) => folder.uri.scheme === "file",
+  );
+  const discovered = (
+    await Promise.all(workspaces.map((folder) => discoverReviewRoots(folder.uri.fsPath)))
+  ).flat();
   const candidates = [
-    ...(vscode.workspace.workspaceFolders ?? [])
-      .filter((folder) => folder.uri.scheme === "file")
-      .map((folder) => ({ name: folder.name, root: folder.uri.fsPath })),
-    ...(ctx.commentProvider?.roots() ?? []).map((root) => ({ name: path.basename(root), root })),
+    ...workspaces.map((folder) => ({ name: folder.name, root: folder.uri.fsPath })),
+    ...[...discovered, ...ctx.commentProvider.persistedRoots(), ...ctx.commentProvider.roots()].map(
+      (root) => ({ name: path.basename(root), root }),
+    ),
   ];
   const seen = new Set<string>();
   const folders = candidates.filter(({ root }) => {

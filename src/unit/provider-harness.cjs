@@ -31,6 +31,14 @@ const withProvider = async (body, options = {}) => {
   const warnings = [];
   const clipboard = [];
   const created = [];
+  const prompts = [];
+  const state = new Map();
+  const globalState = {
+    get: (key, fallback) => (state.has(key) ? state.get(key) : fallback),
+    update: async (key, value) => {
+      state.set(key, value);
+    },
+  };
   const silent = {
     onDidCreate: disposable,
     onDidChange: disposable,
@@ -43,6 +51,10 @@ const withProvider = async (body, options = {}) => {
         options.noWorkspace ? undefined : { uri: { scheme: "file", fsPath: root } },
       createFileSystemWatcher: () => silent,
       onDidChangeTextDocument: disposable,
+      onDidChangeWorkspaceFolders: (f) => {
+        handlers.folders = f;
+        return disposable();
+      },
       onDidCloseTextDocument: (f) => {
         handlers.close = f;
         return disposable();
@@ -51,9 +63,12 @@ const withProvider = async (body, options = {}) => {
     },
     window: {
       visibleTextEditors: [editor],
-      activeTextEditor: editor,
+      activeTextEditor: options.noEditor ? undefined : editor,
       showWarningMessage: (m) => warnings.push(m),
-      showInformationMessage: async () => undefined,
+      showInformationMessage: async (message) => {
+        prompts.push(message);
+        return options.answer;
+      },
     },
     commands: {
       registerCommand: (name, fn) => {
@@ -98,7 +113,7 @@ const withProvider = async (body, options = {}) => {
     const { createCommentProvider } = require(OUT + "provider");
     const { FileCommentStore } = require(OUT + "file-store");
     provider = createCommentProvider(
-      { subscriptions: [] },
+      { subscriptions: [], globalState },
       async () => (options.input ? { text: options.input } : undefined),
       async (text) => {
         clipboard.push(text);
@@ -116,6 +131,8 @@ const withProvider = async (body, options = {}) => {
       warnings,
       clipboard,
       created,
+      prompts,
+      state,
       store: new FileCommentStore(root),
     });
   } finally {
@@ -125,10 +142,13 @@ const withProvider = async (body, options = {}) => {
   }
 };
 
-// Points os.homedir() at `home` for the duration of `body` (it reads $HOME on POSIX).
+// Points os.homedir() at `home` for the duration of `body` (it reads $HOME on POSIX only, so
+// these tests are POSIX-only), and away from the caller's XDG git config.
 const withHome = async (home, body) => {
   const saved = process.env.HOME;
+  const savedXdg = process.env.XDG_CONFIG_HOME;
   process.env.HOME = home;
+  process.env.XDG_CONFIG_HOME = path.join(home, ".no-xdg-config");
   try {
     await body();
   } finally {
@@ -136,6 +156,11 @@ const withHome = async (home, body) => {
       delete process.env.HOME;
     } else {
       process.env.HOME = saved;
+    }
+    if (savedXdg === undefined) {
+      delete process.env.XDG_CONFIG_HOME;
+    } else {
+      process.env.XDG_CONFIG_HOME = savedXdg;
     }
   }
 };

@@ -96,7 +96,26 @@ const withCause = (failure: unknown, cleanup: unknown): unknown => {
 };
 const id = (prefix: string) => `${prefix}_${randomBytes(12).toString("hex")}`;
 export function addReviewIgnore(root: string): void {
-  const name = path.join(root, ".gitignore");
+  appendIgnoreLine(path.join(root, ".gitignore"));
+}
+// Adds the ignore line to `<gitDir>/info/exclude`, which stays out of every commit and, for a
+// worktree, is shared through the common git dir. The info folder and the file must be real
+// (a symlink is refused), so a planted link cannot steer the write out of the git dir.
+export function addGitExclude(gitDir: string): void {
+  const info = path.join(gitDir, "info");
+  try {
+    if (!fs.lstatSync(info).isDirectory()) {
+      throw new Error(`Not a directory: ${info}`);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+    fs.mkdirSync(info);
+  }
+  appendIgnoreLine(path.join(info, "exclude"));
+}
+function appendIgnoreLine(name: string): void {
   let content: string;
   let fd: number;
   try {
