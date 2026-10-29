@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { addGitExclude, addReviewIgnore, FileCommentStore } from "./file-store";
-import { ownGitDir, runGit } from "./git";
+import { hasDotGit, ownGitDir, runGit } from "./git";
 import { repin } from "./anchor";
 import { isUnderGitHome, resolveRoot } from "./root";
 import { getEditorFileName } from "../../editor/utils/detector";
@@ -345,7 +345,7 @@ export const createCommentProvider = (
   );
   // Offers to keep `.local-review/` out of version control. Git decides first: already ignored
   // asks nothing; not ignored offers the repo-private exclude file, never a tracked .gitignore;
-  // only git's "not a repository" answer falls back to a .gitignore in the folder. Any other
+  // only git's "not a repository" answer for a folder with no `.git` entry falls back to a .gitignore in the folder. Any other
   // failure (no git, a timeout, an unvouched-for git dir) is an unknown state and is not worth a
   // prompt.
   const offerIgnore = async (root: string) => {
@@ -359,7 +359,11 @@ export const createCommentProvider = (
         const { code, stderr } = error as { code?: unknown; stderr?: unknown };
         if (code === 1) {
           route = "exclude";
-        } else if (code === 128 && /not a git repository/i.test(String(stderr ?? ""))) {
+        } else if (
+          code === 128 &&
+          /not a git repository/i.test(String(stderr ?? "")) &&
+          !hasDotGit(root)
+        ) {
           route = "gitignore";
         } else {
           return;

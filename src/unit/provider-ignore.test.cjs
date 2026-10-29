@@ -263,3 +263,35 @@ for (const otherName of [["other"], ["elsewhere", ".git"]]) {
     }
   });
 }
+
+for (const [label, plantGit] of [
+  [
+    "a .git file pointing nowhere",
+    (dir) => fs.writeFileSync(path.join(dir, ".git"), "gitdir: /elsewhere\n"),
+  ],
+  ["an empty .git directory", (dir) => fs.mkdirSync(path.join(dir, ".git"))],
+]) {
+  test(`${label} that git rejects gets no prompt and no .gitignore`, async () => {
+    const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "provider-broken-")));
+    try {
+      const broken = path.join(home, "git", "broken");
+      fs.mkdirSync(broken, { recursive: true });
+      plantGit(broken);
+      fs.writeFileSync(path.join(broken, "a.ts"), "line\n");
+      const seen = [];
+      await withHome(home, () =>
+        withProvider(
+          async ({ provider, editor, prompts }) => {
+            await provider.startCommentAtLine(editor.document.uri, 0);
+            seen.push(prompts);
+          },
+          { filePath: path.join(broken, "a.ts"), noWorkspace: true, input: "x", answer: "Add" },
+        ),
+      );
+      assert.deepEqual(seen, [[]]);
+      assert.equal(fs.existsSync(path.join(broken, ".gitignore")), false);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+}

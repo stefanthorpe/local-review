@@ -67,3 +67,13 @@ export const ownGitDir = async (root: string): Promise<string | undefined> => {
     });
   return listed ? commonDir : undefined;
 };
+
+// Whether the folder has a `.git` entry of any kind, valid or not.
+export const hasDotGit = (root: string): boolean => {
+  try {
+    fs.lstatSync(path.join(root, ".git"));
+    return true;
+  } catch (error) {
+    return (error as { code?: unknown }).code !== "ENOENT";
+  }
+};

@@ -5,7 +5,7 @@ import * as vscode from "vscode";
 import type { CommentAction } from "../types/context";
 import { getCurrentLineInfo } from "../../editor/utils/detector";
 import { discoverReviewRoots } from "./discover";
-import { ownGitDir, runGit } from "./git";
+import { hasDotGit, ownGitDir, runGit } from "./git";
 import { repin } from "./anchor";
 import { FileCommentStore, isSafePath } from "./file-store";
 import { formatOpenThreads } from "./format";
@@ -54,15 +54,6 @@ const trackingOf = async (root: string): Promise<Tracking> => {
     const { code, stderr } = error as { code?: unknown; stderr?: unknown };
     const noRepository = code === 128 && /not a git repository/i.test(String(stderr ?? ""));
     return noRepository && !hasDotGit(root) ? "untracked" : "unknown";
-  }
-};
-
-const hasDotGit = (root: string): boolean => {
-  try {
-    fs.lstatSync(path.join(root, ".git"));
-    return true;
-  } catch (error) {
-    return (error as { code?: unknown }).code !== "ENOENT";
   }
 };
 
