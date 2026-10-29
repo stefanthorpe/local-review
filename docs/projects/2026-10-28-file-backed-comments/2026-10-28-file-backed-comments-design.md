@@ -1,5 +1,5 @@
 ---
-version: 2
+version: 3
 ---
 
 # File-Backed Review Comments - Architecture Design
@@ -101,6 +101,8 @@ new status. Both sides read and write the same file and nothing else.
 |------|------------|--------|------------|
 | Agent writes invalid JSON | Medium | Thread disappears from editor | Skip the file, warn with file name and parse error, never overwrite it |
 | Extension's own write triggers its watcher | High | Double render, flicker | Compare rendered snapshots and skip unchanged watcher events |
+| A thread body or a cloned repo's files carry prompt-injection text | Medium | Agent follows instructions it should not | Ids must match a strict pattern and a bad id refuses the whole file; Copy All installs the canonical guide first; excerpts sit in a marked untrusted-content fence. **Residual risk:** the fence is advice to a model, not enforcement, so a body can still sway an agent that reads it; only open threads the user last spoke in are sent, but the user cannot vet text an agent or collaborator wrote into the file |
+| Directory watch goes quiet after `.local-review/` is deleted and recreated | Medium | Agent replies stop rendering | The direct watcher closes and re-arms when its directory is gone or its inode changed |
 | Source file renamed | Low | Review file orphaned | Out of scope for v1; orphan is visible on disk and can be moved by hand |
 | Marketplace upstream auto-updates over the fork | Medium | Fork silently replaced | Distinct publisher and extension identity; install from VSIX only |
 
@@ -150,7 +152,7 @@ Path: `<workspaceRoot>/.local-review/<path relative to root>.review.json`.
 |-------|------|------|
 | `version` | integer | Must be `1`; other values are skipped with a warning |
 | `file` | string | Workspace-relative POSIX path of the source file |
-| `threads[].id` | string | Unique within the file; `t_` + random hex |
+| `threads[].id` | string | Unique within the file; must match `^[A-Za-z0-9_:.-]{1,64}$` (the extension writes `t_` + random hex). One bad id refuses the whole file |
 | `threads[].line` | integer | 1-based |
 | `threads[].anchor` | string | Trimmed text of the line at creation |
 | `threads[].status` | `open` \| `resolved` | |
@@ -169,7 +171,7 @@ so an agent's annotations survive.
 | `FileCommentStore` | Load/save review files; `addThread`, `reply`, `resolve`, `reopen`, `deleteThread`, `listForFile`, `listAll`; atomic writes (temp + rename) |
 | `anchor` util | Pure function: given thread line + anchor + document lines, return re-pinned line and `outdated` flag |
 | `CommentProvider` (extended) | One VS Code comment per thread comment; native resolved state (collapsed); Reply / Resolve / Reopen / Delete actions via `comments/commentThread/*` menus |
-| Review watcher | `FileSystemWatcher` on `.local-review/**/*.review.json`; on create/change/delete, compare snapshots and update changed threads in place |
+| Review watcher | Two layers. A `FileSystemWatcher` on `.local-review/**/*.review.json`, plus a direct non-recursive `fs.watch` fallback on the directory that holds each open document's review file, or on the nearest existing ancestor under `.local-review` before the file exists, because the recursive watcher can miss a subtree created moments earlier. On Linux `fs.watch` on a deleted directory emits `rename`, not `error`, so an entry whose directory is gone or whose inode changed is closed and re-armed. Per-document entries are dropped when the document closes. Events compare snapshot hashes and update changed threads in place |
 | Agent README | `.local-review/README.md` versioned and rewritten on review writes: schema plus the three operations (append reply, set `status`, remove thread) |
 
 ## Behaviour Changes
@@ -177,13 +179,29 @@ so an agent's annotations survive.
 - **Copy All** (`Ctrl+Shift+Enter`) copies an open-thread prompt and no longer clears anything.
 - **Add comment** writes immediately. `copyOnComment` still copies the single
   comment in the old `path:line text` format when enabled; it defaults to false.
+- **Needs the agent** means `status` is `open` and the last comment's author is `user`.
+  Copy All lists only those threads, with the latest user comment as the excerpt,
+  then an "awaiting the user" section (`file:line [id]` only) for open threads where
+  the agent spoke last. A reply made in the editor sets the thread back to `open`.
+- **Copy All installs the canonical guide** in each folder before emitting the prompt,
+  because the prompt tells the agent to read it and a cloned repo could ship its own.
+  A folder whose guide cannot be installed is left out of the prompt and reported.
+  Thread excerpts are fenced as untrusted review text. Errors from several files
+  collapse into one summary warning.
 - **First use** in a workspace offers to add `.local-review/` to `.gitignore`.
 
 ## Error Handling
 
 - **Malformed file:** threads in it are not shown; a warning names the file and the
   parse error; the store refuses to write to that file until it parses again.
-- **Atomic writes:** write to `<name>.tmp`, then rename over the target.
+- **Refusal reasons:** the message names the first bad thread index and the reason
+  (for example the id pattern). If the file is refused when the user adds a comment,
+  the typed text is shown in the warning and copied to the clipboard.
+- **Refused file with threads already rendered:** the rendered threads stay until the
+  file parses again; only a missing file clears them.
+- **Atomic writes:** write to `<name>.tmp`, fsync it, then rename over the target.
+- **Left side of a diff** (`git:` / `diff:` URIs): the warning says the side is
+  read-only and not file-backed.
 - **No workspace folder:** commands warn and do nothing, as upstream does for no editor.
 
 ## Testing
@@ -199,6 +217,21 @@ TDD per the RS universal rules.
   file updates the rendered thread; a self-write does not double-render.
 
 ## Changelog
+
+### v3 — 2026-10-28
+
+- Add the direct `fs.watch` fallback (also on the nearest existing ancestor before the
+  review file exists) and re-arm it when its directory is deleted and recreated; drop
+  per-document watcher, thread and snapshot state when a document closes.
+- Restrict thread ids to `^[A-Za-z0-9_:.-]{1,64}$`; one bad id refuses the whole file,
+  and the error names the thread index and reason.
+- Define "needs the agent" (open, user spoke last); a user reply reopens the thread;
+  Copy All lists those threads plus an awaiting-the-user section.
+- Copy All installs the canonical guide before emitting its prompt (guide v3: needs-agent
+  rule, id pattern, `line` is where the comment was made and `anchor` locates the code,
+  self-check command, Markdown bodies).
+- Record the residual prompt-injection risk from thread bodies (see Risks).
+- A refused file keeps rendered threads and the user's typed text.
 
 ### v2 — 2026-10-28
 
