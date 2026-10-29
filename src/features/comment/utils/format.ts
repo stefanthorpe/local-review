@@ -1,4 +1,7 @@
 import { Comment } from "../types/comment";
+import { THREAD_ID_PATTERN } from "./file-store";
+
+const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
 
 export const formatStandardComment = (comment: Comment): string => {
   return `${comment.fileName}:${comment.lineNumber + 1} ${comment.text}`;
@@ -17,12 +20,12 @@ export const formatOpenThreads = (
   for (const folder of folders) {
     for (const file of folder.files) {
       for (const thread of file.threads) {
-        if (thread.status !== "open") {
+        if (thread.status !== "open" || !THREAD_ID_PATTERN.test(thread.id)) {
           continue;
         }
-        const body = (thread.comments[0]?.body ?? "").replace(/\s+/g, " ").trim();
+        const body = oneLine(thread.comments[0]?.body ?? "");
         const excerpt = body.length > 80 ? `${body.slice(0, 79)}…` : body;
-        const name = folders.length > 1 ? `${folder.name}/${file.file}` : file.file;
+        const name = oneLine(folders.length > 1 ? `${folder.name}/${file.file}` : file.file);
         lines.push(`- ${name}:${thread.line} [${thread.id}] ${excerpt}`);
       }
     }

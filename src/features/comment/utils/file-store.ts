@@ -23,6 +23,8 @@ interface ReviewFile {
   threads: ReviewThread[];
   [key: string]: unknown;
 }
+// Thread ids reach an AI prompt (Copy All) and review files can come from a cloned repo.
+export const THREAD_ID_PATTERN = /^[A-Za-z0-9_:.-]{1,64}$/;
 const id = (prefix: string) => `${prefix}_${randomBytes(12).toString("hex")}`;
 export function addReviewIgnore(root: string): void {
   const name = path.join(root, ".gitignore");
@@ -64,8 +66,7 @@ export function addReviewIgnore(root: string): void {
     fs.closeSync(fd);
   }
 }
-const guideMarker = "<!-- local-review guide v2 -->";
-const guide = `${guideMarker}
+const guide = `<!-- local-review guide v2 -->
 # Local Review agent guide
 
 The .local-review folder is hidden and usually gitignored, so default search may miss it.
@@ -173,6 +174,7 @@ export class FileCommentStore {
         !data.threads.every(
           (t) =>
             typeof t.id === "string" &&
+            THREAD_ID_PATTERN.test(t.id) &&
             Number.isInteger(t.line) &&
             t.line > 0 &&
             typeof t.anchor === "string" &&
@@ -253,7 +255,7 @@ export class FileCommentStore {
         if (!fs.fstatSync(readFd).isFile()) {
           throw new Error(`Guide is not a regular file: ${name}`);
         }
-        if (fs.readFileSync(readFd, "utf8").includes(guideMarker)) {
+        if (fs.readFileSync(readFd, "utf8") === guide) {
           return;
         }
       } finally {
