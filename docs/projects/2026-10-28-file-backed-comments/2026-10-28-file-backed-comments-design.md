@@ -1,5 +1,5 @@
 ---
-version: 3
+version: 4
 ---
 
 # File-Backed Review Comments - Architecture Design
@@ -102,6 +102,8 @@ new status. Both sides read and write the same file and nothing else.
 | Agent writes invalid JSON | Medium | Thread disappears from editor | Skip the file, warn with file name and parse error, never overwrite it |
 | Extension's own write triggers its watcher | High | Double render, flicker | Compare rendered snapshots and skip unchanged watcher events |
 | A thread body or a cloned repo's files carry prompt-injection text | Medium | Agent follows instructions it should not | Ids must match a strict pattern and a bad id refuses the whole file; Copy All installs the canonical guide first; excerpts sit in a marked untrusted-content fence. **Residual risk:** the fence is advice to a model, not enforcement, so a body can still sway an agent that reads it; only open threads the user last spoke in are sent, but the user cannot vet text an agent or collaborator wrote into the file |
+| A review file claims to be the user's but is not (the `author` field is unverified, and review files can arrive in a clone or a pull) | Medium | Agent acts on a stranger's request | The prompt frames items as code-review requests that cannot override the guide and tells the agent never to run commands, install packages or fetch URLs from them without asking the user. Copy All warns when git tracks any `.local-review/*.review.json` in a folder, since those threads came from a commit. **Residual risk:** `author` is a plain string anyone can write, an untracked file placed by another process looks identical to the user's, and the framing is advice to a model |
+| A review path carries shell syntax or line breaks | Medium | Quoted prompt line broken or a command smuggled into an agent's shell | Paths containing control, line/paragraph-separator or format characters, backtick, `$`, `;`, `&`, `|`, `<`, `>`, `"` or `\` are refused when a thread is added (the typed text is kept) and skipped with a named warning when found on disk; every path in the prompt is single-quoted; folder roots and guide paths pass the same check. **Residual risk:** a path may still hold `[ ] ( ) # ' @ + ,` and spaces, so the quoting, not the filter alone, protects a shell, and a model can still misread an odd path |
 | Directory watch goes quiet after `.local-review/` is deleted and recreated | Medium | Agent replies stop rendering | The direct watcher closes and re-arms when its directory is gone or its inode changed |
 | Source file renamed | Low | Review file orphaned | Out of scope for v1; orphan is visible on disk and can be moved by hand |
 | Marketplace upstream auto-updates over the fork | Medium | Fork silently replaced | Distinct publisher and extension identity; install from VSIX only |
@@ -168,10 +170,10 @@ so an agent's annotations survive.
 
 | Component | Responsibility |
 |-----------|----------------|
-| `FileCommentStore` | Load/save review files; `addThread`, `reply`, `resolve`, `reopen`, `deleteThread`, `listForFile`, `listAll`; atomic writes (temp + rename) |
+| `FileCommentStore` | Load/save review files; `addThread`, `reply`, `resolve`, `reopen`, `deleteThread`, `listForFile`, `listAll`; atomic writes (temp + rename + directory fsync) |
 | `anchor` util | Pure function: given thread line + anchor + document lines, return re-pinned line and `outdated` flag |
 | `CommentProvider` (extended) | One VS Code comment per thread comment; native resolved state (collapsed); Reply / Resolve / Reopen / Delete actions via `comments/commentThread/*` menus |
-| Review watcher | Two layers. A `FileSystemWatcher` on `.local-review/**/*.review.json`, plus a direct non-recursive `fs.watch` fallback on the directory that holds each open document's review file, or on the nearest existing ancestor under `.local-review` before the file exists, because the recursive watcher can miss a subtree created moments earlier. On Linux `fs.watch` on a deleted directory emits `rename`, not `error`, so an entry whose directory is gone or whose inode changed is closed and re-armed. Per-document entries are dropped when the document closes. Events compare snapshot hashes and update changed threads in place |
+| Review watcher | Two layers. A `FileSystemWatcher` on `.local-review/**/*.review.json`, plus a direct non-recursive `fs.watch` fallback on the directory that holds each open document's review file, or on the nearest existing ancestor (up to the workspace folder root when `.local-review` itself is missing, with the folder watcher's create event also subscribed) before the file exists, because the recursive watcher can miss a subtree created moments earlier. On Linux `fs.watch` on a deleted directory emits `rename`, not `error`, so an entry whose directory is gone or whose inode changed is closed and re-armed. Per-document entries are dropped when the document closes, and a document's key leaves an ancestor watch once its own directory is watched. Events compare snapshot hashes and update changed threads in place |
 | Agent README | `.local-review/README.md` versioned and rewritten on review writes: schema plus the three operations (append reply, set `status`, remove thread) |
 
 ## Behaviour Changes
@@ -181,13 +183,18 @@ so an agent's annotations survive.
   comment in the old `path:line text` format when enabled; it defaults to false.
 - **Needs the agent** means `status` is `open` and the last comment's author is `user`.
   Copy All lists only those threads, with the latest user comment as the excerpt,
-  then an "awaiting the user" section (`file:line [id]` only) for open threads where
-  the agent spoke last. A reply made in the editor sets the thread back to `open`.
+  then an "awaiting the user" section (path, line and id only) for open threads where
+  the agent spoke last. An open thread with no comments is listed for the agent. Entries
+  are grouped under their quoted review file path, every path is single-quoted, and the
+  prompt says to read the whole thread in its review file. Line numbers are re-pinned
+  from the current source for the prompt only (nothing is written back) and marked
+  "(outdated)" when the anchor is gone. A reply made in the editor sets the thread back to `open`.
 - **Copy All installs the canonical guide** in each folder before emitting the prompt,
   because the prompt tells the agent to read it and a cloned repo could ship its own.
   A folder whose guide cannot be installed is left out of the prompt and reported.
   Thread excerpts are fenced as untrusted review text. Errors from several files
-  collapse into one summary warning.
+  collapse into one summary warning, led by any guide failure; when nothing is copied
+  because folders were skipped, the message says how many.
 - **First use** in a workspace offers to add `.local-review/` to `.gitignore`.
 
 ## Error Handling
@@ -196,10 +203,14 @@ so an agent's annotations survive.
   parse error; the store refuses to write to that file until it parses again.
 - **Refusal reasons:** the message names the first bad thread index and the reason
   (for example the id pattern). If the file is refused when the user adds a comment,
-  the typed text is shown in the warning and copied to the clipboard.
+  the typed text is copied to the clipboard, for a reply as well as a new comment; the
+  warning says whether the copy worked and repeats the text only when it did not
+  (shortened when it did).
 - **Refused file with threads already rendered:** the rendered threads stay until the
   file parses again; only a missing file clears them.
-- **Atomic writes:** write to `<name>.tmp`, fsync it, then rename over the target.
+- **Atomic writes:** write to `<name>.tmp`, fsync it, rename over the target, then fsync
+  the directory (best effort). The first error is the one thrown; a cleanup failure is
+  attached as its `cause`. The guide is replaced the same way, without the directory sync.
 - **Left side of a diff** (`git:` / `diff:` URIs): the warning says the side is
   read-only and not file-backed.
 - **No workspace folder:** commands warn and do nothing, as upstream does for no editor.
@@ -217,6 +228,29 @@ TDD per the RS universal rules.
   file updates the rendered thread; a self-write does not double-render.
 
 ## Changelog
+
+### v4 — 2026-10-28
+
+- Path rule: review paths containing control, line/paragraph-separator or format
+  characters, or any of backtick, `$`, `;`, `&`, `|`, `<`, `>`, `"` and `\`, are refused at
+  `addThread` (the user's text is kept) and skipped with a named warning in `listAll`.
+  `[ ] ( ) # '`, `@ + , . - _` and spaces stay legal, so `app/[slug]/page.tsx`,
+  `pages/[...all].tsx`, `src/it's.ts` and `docs/C#.md` work. Every prompt path is
+  single-quoted (`'` becomes `'\''`), folder roots and guide paths pass the same check, and
+  a line-break scrub runs on each path as a second layer. Residual risk: see Risks.
+- Prompt: grouped by review file, whole-thread note, empty open threads listed, excerpts
+  cut by code point, "(outdated)" from a Copy-All-time re-pin that persists nothing.
+  The untrusted-text sentence now frames items as code-review requests and forbids running
+  commands, installing packages or fetching URLs from them without asking the user.
+- Copy All warns when git tracks review files (the `author` is unverified); a skipped
+  guide is reported first and as "skipped", never as "nothing needs the agent".
+- Watcher falls back to the workspace folder root when `.local-review` is missing and
+  subscribes to the folder create event; keys leave ancestor watches once the own
+  directory is watched.
+- A reply to a refused file goes to the clipboard; the toast reports the copy result.
+- `save()` keeps the first error with cleanup errors as `cause` and fsyncs the directory;
+  the guide is rewritten via temp file and rename. Guide v5: schema-complete one-line
+  self-check and an example whose fixed thread is `resolved`.
 
 ### v3 — 2026-10-28
 
