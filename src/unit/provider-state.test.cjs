@@ -5,8 +5,6 @@ const os = require("node:os");
 const path = require("node:path");
 const { withProvider, withHome } = require("./provider-harness.cjs");
 
-const KEY = "localReview.knownRoots";
-
 const withHomeDir = async (body) => {
   const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "provider-state-")));
   try {
@@ -16,45 +14,7 @@ const withHomeDir = async (body) => {
   }
 };
 
-test("a saved comment persists its root; mere viewing does not", async () => {
-  await withProvider(
-    async ({ root, provider, editor, state }) => {
-      provider.refreshForEditor(editor);
-      assert.equal(state.get(KEY), undefined);
-      await provider.startCommentAtLine(editor.document.uri, 0);
-      assert.deepEqual(state.get(KEY), [root]);
-      await provider.startCommentAtLine(editor.document.uri, 0);
-      assert.deepEqual(state.get(KEY), [root]);
-    },
-    { input: "x" },
-  );
-});
-
-test("persistedRoots drops a root whose .local-review is gone and prunes it from state", async () => {
-  await withProvider(
-    async ({ root, provider, editor, state }) => {
-      await provider.startCommentAtLine(editor.document.uri, 0);
-      state.set(KEY, [root, "/nonexistent/gone"]);
-      assert.deepEqual(provider.persistedRoots(), [root]);
-      assert.deepEqual(state.get(KEY), [root]);
-      fs.rmSync(path.join(root, ".local-review"), { recursive: true });
-      assert.deepEqual(provider.persistedRoots(), []);
-      assert.deepEqual(state.get(KEY), []);
-    },
-    { input: "x" },
-  );
-});
-
-test("persistedRoots tolerates a malformed state value", async () => {
-  await withProvider(async ({ provider, state }) => {
-    state.set(KEY, { not: "an array" });
-    assert.deepEqual(provider.persistedRoots(), []);
-    state.set(KEY, [42, null]);
-    assert.deepEqual(provider.persistedRoots(), []);
-  });
-});
-
-test("an unsaved or non-file document is told to save first", async () => {
+test("only an untitled document is told to save first", async () => {
   await withProvider(
     async ({ provider, editor, warnings }) => {
       await provider.startCommentAtLine({ ...editor.document.uri, scheme: "untitled" }, 0);
@@ -62,12 +22,25 @@ test("an unsaved or non-file document is told to save first", async () => {
     },
     { input: "x" },
   );
+});
+
+test("no active editor asks to open the file in an editor", async () => {
   await withProvider(
     async ({ provider, editor, warnings }) => {
       await provider.startCommentAtLine(editor.document.uri, 0);
-      assert.deepEqual(warnings, ["Save the file first; comments are stored next to saved files."]);
+      assert.deepEqual(warnings, ["Open the file in an editor to comment on it."]);
     },
     { input: "x", noEditor: true },
+  );
+});
+
+test("a non-file, non-untitled scheme says comments are for files on this machine", async () => {
+  await withProvider(
+    async ({ provider, editor, warnings }) => {
+      await provider.startCommentAtLine({ ...editor.document.uri, scheme: "vscode-remote" }, 0);
+      assert.deepEqual(warnings, ["Comments can only be saved for files on this machine."]);
+    },
+    { input: "x" },
   );
 });
 
@@ -104,6 +77,26 @@ test("removing a workspace folder drops its fallback root but keeps repo roots",
       await provider.startCommentAtLine(editor.document.uri, 0);
       handlers.folders({ removed: [{ uri: { scheme: "file", fsPath: root } }] });
       assert.deepEqual(provider.roots(), [root]);
+    },
+    { input: "x" },
+  );
+});
+
+test("Copy All no longer lists a closed folder's fallback root", async () => {
+  await withProvider(
+    async ({ root, provider, editor, handlers, workspaceFolders, submit, clipboard, warnings }) => {
+      await provider.startCommentAtLine(editor.document.uri, 0);
+      await submit();
+      assert.equal(clipboard.length, 1);
+      assert.match(clipboard[0], /x/);
+      workspaceFolders.length = 0;
+      handlers.folders({ removed: [{ uri: { scheme: "file", fsPath: root } }] });
+      await submit();
+      assert.equal(clipboard.length, 1);
+      assert.equal(
+        warnings.at(-1),
+        "Comments are only saved for files under ~/git or the open folder.",
+      );
     },
     { input: "x" },
   );

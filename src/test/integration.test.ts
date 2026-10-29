@@ -77,7 +77,6 @@ suite("Review watcher", () => {
     provider = createCommentProvider(
       {
         subscriptions,
-        globalState: { get: (_key: string, fallback: unknown) => fallback, update: async () => {} },
       } as unknown as vscode.ExtensionContext,
       async () => ({ text: "self" }),
       async () => true,

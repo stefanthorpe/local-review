@@ -77,3 +77,50 @@ test("an external edit of a review file in a root outside the workspace refreshe
     assert.equal(thread.comments.length, 2);
   });
 });
+
+test("reply and resolve work on a thread in a ~/git root with no workspace folder", async () => {
+  await withRepo(
+    async ({ repo, provider, editor, created, commands }) => {
+      await provider.startCommentAtLine(editor.document.uri, 0);
+      const file = path.join(repo, ".local-review", "src", "a.ts.review.json");
+      const thread = created[0];
+      assert.match(thread.contextValue, /^localReviewThread:open:/);
+      commands["localReview.reply"]({ thread, text: "second" });
+      let data = JSON.parse(fs.readFileSync(file, "utf8"));
+      assert.deepEqual(
+        data.threads[0].comments.map((c) => [c.author, c.body]),
+        [
+          ["user", "first"],
+          ["user", "second"],
+        ],
+      );
+      commands["localReview.resolve"](thread);
+      data = JSON.parse(fs.readFileSync(file, "utf8"));
+      assert.equal(data.threads[0].status, "resolved");
+    },
+    { input: "first", registerCommands: true },
+  );
+});
+
+test("a reply with no store root keeps the typed text instead of dropping it", async () => {
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "provider-lost-"));
+  try {
+    await withProvider(
+      async ({ commands, editor, warnings, clipboard }) => {
+        const thread = {
+          uri: editor.document.uri,
+          contextValue: "localReviewThread:open:t:aaaa:1",
+        };
+        commands["localReview.reply"]({ thread, text: "my long reply" });
+        await until(() => warnings.length > 0);
+        assert.deepEqual(clipboard, ["my long reply"]);
+        assert.equal(warnings.length, 1);
+        assert.match(warnings[0], /no store root for this file/);
+        assert.match(warnings[0], /my long reply/);
+      },
+      { filePath: path.join(outside, "a.ts"), noWorkspace: true, registerCommands: true },
+    );
+  } finally {
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});

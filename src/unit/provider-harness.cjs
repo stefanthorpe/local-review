@@ -15,7 +15,17 @@ const until = async (condition, ms = 3000) => {
 // Runs `body` against a provider wired to a mocked `vscode` whose own file watchers stay silent,
 // so only the provider's fs.watch fallback can notice external writes.
 const withProvider = async (body, options = {}) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-robust-"));
+  if (homeDepth === 0) {
+    // Never let the real $HOME (its ~/git, its git config) reach the code under test.
+    const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "provider-home-")));
+    try {
+      await withHome(home, () => withProvider(body, options));
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+    return;
+  }
+  const root = options.root ?? fs.mkdtempSync(path.join(os.tmpdir(), "provider-robust-"));
   const uri = {
     scheme: "file",
     fsPath: options.filePath ?? path.join(root, "sub", "a"),
@@ -32,13 +42,9 @@ const withProvider = async (body, options = {}) => {
   const clipboard = [];
   const created = [];
   const prompts = [];
-  const state = new Map();
-  const globalState = {
-    get: (key, fallback) => (state.has(key) ? state.get(key) : fallback),
-    update: async (key, value) => {
-      state.set(key, value);
-    },
-  };
+  const workspaceFolders = options.noWorkspace
+    ? []
+    : [{ name: path.basename(root), uri: { scheme: "file", fsPath: root } }];
   const silent = {
     onDidCreate: disposable,
     onDidChange: disposable,
@@ -47,6 +53,9 @@ const withProvider = async (body, options = {}) => {
   };
   const vscode = {
     workspace: {
+      get workspaceFolders() {
+        return workspaceFolders;
+      },
       getWorkspaceFolder: () =>
         options.noWorkspace ? undefined : { uri: { scheme: "file", fsPath: root } },
       createFileSystemWatcher: () => silent,
@@ -65,6 +74,7 @@ const withProvider = async (body, options = {}) => {
       visibleTextEditors: [editor],
       activeTextEditor: options.noEditor ? undefined : editor,
       showWarningMessage: (m) => warnings.push(m),
+      showErrorMessage: (m) => warnings.push(m),
       showInformationMessage: async (message) => {
         prompts.push(message);
         return options.answer;
@@ -113,7 +123,7 @@ const withProvider = async (body, options = {}) => {
     const { createCommentProvider } = require(OUT + "provider");
     const { FileCommentStore } = require(OUT + "file-store");
     provider = createCommentProvider(
-      { subscriptions: [], globalState },
+      { subscriptions: [] },
       async () => (options.input ? { text: options.input } : undefined),
       async (text) => {
         clipboard.push(text);
@@ -132,7 +142,19 @@ const withProvider = async (body, options = {}) => {
       clipboard,
       created,
       prompts,
-      state,
+      workspaceFolders,
+      // Runs Copy All against this provider and the same mocked vscode.
+      submit: async () => {
+        delete require.cache[require.resolve(OUT + "actions")];
+        const { submitComments } = require(OUT + "actions");
+        await submitComments({
+          commentProvider: provider,
+          copyToClipboard: async (text) => {
+            clipboard.push(text);
+            return true;
+          },
+        });
+      },
       store: new FileCommentStore(root),
     });
   } finally {
@@ -144,7 +166,9 @@ const withProvider = async (body, options = {}) => {
 
 // Points os.homedir() at `home` for the duration of `body` (it reads $HOME on POSIX only, so
 // these tests are POSIX-only), and away from the caller's XDG git config.
+let homeDepth = 0;
 const withHome = async (home, body) => {
+  homeDepth++;
   const saved = process.env.HOME;
   const savedXdg = process.env.XDG_CONFIG_HOME;
   process.env.HOME = home;
@@ -152,6 +176,7 @@ const withHome = async (home, body) => {
   try {
     await body();
   } finally {
+    homeDepth--;
     if (saved === undefined) {
       delete process.env.HOME;
     } else {

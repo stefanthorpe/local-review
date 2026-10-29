@@ -16,12 +16,12 @@ export interface CommentProvider {
   refreshForEditor(editor?: vscode.TextEditor): void;
   clearAllThreads(): void;
   roots(): string[];
-  persistedRoots(): string[];
   dispose(): void;
 }
 
-const KNOWN_ROOTS_KEY = "localReview.knownRoots";
 const SAVE_FIRST = "Save the file first; comments are stored next to saved files.";
+const NO_EDITOR = "Open the file in an editor to comment on it.";
+const NOT_LOCAL = "Comments can only be saved for files on this machine.";
 const NOT_IN_REPO =
   "Comments are saved in the git repository that holds the file; this file under ~/git is not in one.";
 const NOT_STORABLE =
@@ -47,27 +47,6 @@ export const createCommentProvider = (
   // Roots that fell back to the workspace folder because no repository holds the file; they go
   // when that folder is closed, while repository roots stay for the session.
   const fallbackRoots = new Set<string>();
-  const storedRoots = (): string[] => {
-    const value = context.globalState.get<unknown>(KNOWN_ROOTS_KEY, []);
-    return Array.isArray(value)
-      ? value.filter((item): item is string => typeof item === "string")
-      : [];
-  };
-  // Remembers a root a comment was written under, so Copy All finds its threads after a reload.
-  const remember = (root: string) => {
-    const known = storedRoots();
-    if (!known.includes(root)) {
-      void context.globalState.update(KNOWN_ROOTS_KEY, [...known, root]);
-    }
-  };
-  const persistedRoots = (): string[] => {
-    const known = storedRoots();
-    const alive = known.filter((root) => fs.existsSync(path.join(root, ".local-review")));
-    if (alive.length !== known.length) {
-      void context.globalState.update(KNOWN_ROOTS_KEY, alive);
-    }
-    return alive;
-  };
   const storeFor = (uri: vscode.Uri) => {
     if (uri.scheme !== "file") {
       return undefined;
@@ -288,11 +267,14 @@ export const createCommentProvider = (
       return;
     }
     if (!info || !id) {
+      // A reply was typed for a thread whose file no longer maps to a store; do not lose it.
+      if (typed !== undefined) {
+        void keepText(new Error("no store root for this file"), typed);
+      }
       return;
     }
     try {
       fn(info.store, info.relative, id);
-      remember(info.root);
       for (const editor of vscode.window.visibleTextEditors) {
         if (editor.document.uri.toString() === thread.uri.toString()) {
           refreshForEditor(editor);
@@ -361,39 +343,80 @@ export const createCommentProvider = (
       }
     }),
   );
-  // Offers to keep `.local-review/` out of version control. In a repository it asks only when git
-  // does not already ignore it, and writes the repo-private exclude file rather than a tracked
-  // .gitignore; a folder with no repository keeps the .gitignore route.
+  // The git dir that holds this folder's private exclude file, or undefined when it cannot be
+  // vouched for. A cloned repo can ship a `.git` file that points git anywhere, so the common
+  // dir git reports is used only when it is this folder's own: the `.git` directory of the repo,
+  // or the common dir of a repo that really lists this folder as one of its worktrees.
+  const ownGitDir = async (root: string): Promise<string | undefined> => {
+    const { stdout: common } = await runGit(root, ["rev-parse", "--git-common-dir"]);
+    const commonDir = fs.realpathSync(path.resolve(root, common.replace(/\r?\n$/, "")));
+    let anchor = root;
+    if (!fs.existsSync(path.join(root, ".git"))) {
+      // No `.git` of its own: the folder sits inside a repo, whose top level is the anchor.
+      const { stdout: top } = await runGit(root, ["rev-parse", "--show-toplevel"]);
+      anchor = fs.realpathSync(top.replace(/\r?\n$/, ""));
+    }
+    const dotGit = path.join(anchor, ".git");
+    const stat = fs.lstatSync(dotGit);
+    if (stat.isDirectory()) {
+      return fs.realpathSync(dotGit) === commonDir ? commonDir : undefined;
+    }
+    if (!stat.isFile() || path.basename(commonDir) !== ".git") {
+      return undefined;
+    }
+    const { stdout: listing } = await runGit(root, ["worktree", "list", "--porcelain"]);
+    const realAnchor = fs.realpathSync(anchor);
+    const listed = listing
+      .split("\n")
+      .filter((line) => line.startsWith("worktree "))
+      .some((line) => {
+        try {
+          return fs.realpathSync(line.slice("worktree ".length)) === realAnchor;
+        } catch {
+          return false;
+        }
+      });
+    return listed ? commonDir : undefined;
+  };
+  // Offers to keep `.local-review/` out of version control. Git decides first: already ignored
+  // asks nothing; not ignored offers the repo-private exclude file, never a tracked .gitignore;
+  // only git's "not a repository" answer falls back to a .gitignore in the folder. Any other
+  // failure (no git, a timeout, an unvouched-for git dir) is an unknown state and is not worth a
+  // prompt.
   const offerIgnore = async (root: string) => {
     const name = path.basename(root);
     try {
-      if (!fs.existsSync(path.join(root, ".git"))) {
-        const answer = await vscode.window.showInformationMessage(
-          `Add .local-review/ to .gitignore in ${name}?`,
-          "Add",
-        );
-        if (answer === "Add") {
-          addReviewIgnore(root);
-        }
-        return;
-      }
+      let route: "exclude" | "gitignore";
       try {
         await runGit(root, ["check-ignore", "-q", ".local-review/"]);
         return;
       } catch (error) {
-        // Exit 1 means not ignored. Anything else (no git, not a repository) leaves it unknown,
-        // and an unknown state is not worth a prompt.
-        if ((error as { code?: unknown }).code !== 1) {
+        const { code, stderr } = error as { code?: unknown; stderr?: unknown };
+        if (code === 1) {
+          route = "exclude";
+        } else if (code === 128 && /not a git repository/i.test(String(stderr ?? ""))) {
+          route = "gitignore";
+        } else {
           return;
         }
       }
+      const gitDir = route === "exclude" ? await ownGitDir(root).catch(() => undefined) : undefined;
+      if (route === "exclude" && !gitDir) {
+        return;
+      }
       const answer = await vscode.window.showInformationMessage(
-        `Ignore .local-review/ in ${name}?`,
+        route === "exclude"
+          ? `Ignore .local-review/ in ${name}?`
+          : `Add .local-review/ to .gitignore in ${name}?`,
         "Add",
       );
-      if (answer === "Add") {
-        const { stdout } = await runGit(root, ["rev-parse", "--git-common-dir"]);
-        addGitExclude(path.resolve(root, stdout.replace(/\r?\n$/, "")));
+      if (answer !== "Add") {
+        return;
+      }
+      if (gitDir) {
+        addGitExclude(gitDir);
+      } else {
+        addReviewIgnore(root);
       }
     } catch (error) {
       void vscode.window.showWarningMessage(`Failed to update the ignore rules: ${error}`);
@@ -410,11 +433,15 @@ export const createCommentProvider = (
     const info = storeFor(uri);
     if (!info || !editor) {
       void vscode.window.showWarningMessage(
-        !editor || uri.scheme !== "file"
-          ? SAVE_FIRST
-          : isUnderGitHome(uri.fsPath, os.homedir())
-            ? NOT_IN_REPO
-            : NOT_STORABLE,
+        !editor
+          ? NO_EDITOR
+          : uri.scheme === "untitled"
+            ? SAVE_FIRST
+            : uri.scheme !== "file"
+              ? NOT_LOCAL
+              : isUnderGitHome(uri.fsPath, os.homedir())
+                ? NOT_IN_REPO
+                : NOT_STORABLE,
       );
       return;
     }
@@ -430,7 +457,6 @@ export const createCommentProvider = (
       await keepText(error, result.text);
       return;
     }
-    remember(info.root);
     if (first) {
       await offerIgnore(info.root);
     }
@@ -466,7 +492,6 @@ export const createCommentProvider = (
     refreshForEditor,
     clearAllThreads,
     roots: () => [...stores.keys()],
-    persistedRoots,
     dispose: () => {
       clearAllThreads();
       controller.dispose();

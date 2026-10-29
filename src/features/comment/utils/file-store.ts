@@ -101,6 +101,10 @@ export function addReviewIgnore(root: string): void {
 // Adds the ignore line to `<gitDir>/info/exclude`, which stays out of every commit and, for a
 // worktree, is shared through the common git dir. The info folder and the file must be real
 // (a symlink is refused), so a planted link cannot steer the write out of the git dir.
+//
+// Accepted limit: `info` is checked with lstat and then used, so a process that swaps it for a
+// symlink in between could redirect the write. That needs an attacker already running as the
+// user inside the repo's git dir, which could edit the exclude file directly.
 export function addGitExclude(gitDir: string): void {
   const info = path.join(gitDir, "info");
   try {

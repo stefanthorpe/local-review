@@ -139,3 +139,127 @@ test("a symlinked exclude file is refused and the link target is untouched", asy
     { answer: "Add" },
   );
 });
+
+test("a workspace folder inside a repo (no .git entry of its own) uses the repo's private exclude", async () => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "provider-sub-")));
+  try {
+    const repo = path.join(home, "other", "repo");
+    const sub = path.join(repo, "sub");
+    fs.mkdirSync(sub, { recursive: true });
+    git(repo, "init", "-q");
+    fs.writeFileSync(path.join(sub, "a.ts"), "line\n");
+    await withHome(home, () =>
+      withProvider(
+        async ({ provider, editor, prompts, warnings }) => {
+          await provider.startCommentAtLine(editor.document.uri, 0);
+          assert.deepEqual(prompts, ["Ignore .local-review/ in sub?"]);
+          assert.deepEqual(warnings, []);
+          assert.match(
+            fs.readFileSync(path.join(repo, ".git", "info", "exclude"), "utf8"),
+            /^\.local-review\/$/m,
+          );
+          assert.equal(fs.existsSync(path.join(sub, ".gitignore")), false);
+          assert.equal(fs.existsSync(path.join(repo, ".gitignore")), false);
+        },
+        { root: sub, filePath: path.join(sub, "a.ts"), input: "x", answer: "Add" },
+      ),
+    );
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("an already ignored folder inside a repo gets no prompt", async () => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "provider-sub-")));
+  try {
+    const repo = path.join(home, "other", "repo");
+    const sub = path.join(repo, "sub");
+    fs.mkdirSync(sub, { recursive: true });
+    git(repo, "init", "-q");
+    fs.writeFileSync(path.join(repo, ".gitignore"), ".local-review/\n");
+    fs.writeFileSync(path.join(sub, "a.ts"), "line\n");
+    await withHome(home, () =>
+      withProvider(
+        async ({ provider, editor, prompts }) => {
+          await provider.startCommentAtLine(editor.document.uri, 0);
+          assert.deepEqual(prompts, []);
+        },
+        { root: sub, filePath: path.join(sub, "a.ts"), input: "x", answer: "Add" },
+      ),
+    );
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a missing git gives no prompt and writes nothing", async () => {
+  await withRealRepo(
+    async ({ repo, provider, editor, prompts, warnings }) => {
+      const saved = process.env.PATH;
+      const empty = fs.mkdtempSync(path.join(os.tmpdir(), "provider-nogit-"));
+      process.env.PATH = empty;
+      try {
+        await provider.startCommentAtLine(editor.document.uri, 0);
+      } finally {
+        process.env.PATH = saved;
+        fs.rmSync(empty, { recursive: true, force: true });
+      }
+      assert.deepEqual(prompts, []);
+      assert.deepEqual(warnings, []);
+      assert.equal(fs.existsSync(path.join(repo, ".gitignore")), false);
+      assert.doesNotMatch(
+        fs.readFileSync(path.join(repo, ".git", "info", "exclude"), "utf8"),
+        /local-review/,
+      );
+    },
+    { answer: "Add" },
+  );
+});
+
+// A cloned repo can ship a `.git` file that redirects git to any directory. The exclude file is
+// written only when that directory really is this folder's own git dir.
+const plant = async (home, otherName, body) => {
+  const evil = path.join(home, "git", "evil");
+  const fake = path.join(home, "git", "fake");
+  const other = path.join(home, "git", ...otherName);
+  fs.mkdirSync(evil, { recursive: true });
+  for (const dir of [fake, path.join(other, "objects"), path.join(other, "refs")]) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  fs.writeFileSync(path.join(evil, ".git"), "gitdir: ../fake\n");
+  fs.writeFileSync(path.join(fake, "HEAD"), "ref: refs/heads/main\n");
+  fs.writeFileSync(path.join(fake, "commondir"), `${path.relative(fake, other)}\n`);
+  fs.writeFileSync(path.join(other, "HEAD"), "ref: refs/heads/main\n");
+  fs.writeFileSync(path.join(evil, "a.ts"), "line\n");
+  await withHome(home, () =>
+    withProvider(body, {
+      filePath: path.join(evil, "a.ts"),
+      noWorkspace: true,
+      input: "x",
+      answer: "Add",
+    }),
+  );
+  return { evil, fake, other };
+};
+
+for (const otherName of [["other"], ["elsewhere", ".git"]]) {
+  test(`a planted .git file redirecting to ${otherName.join("/")} gets no prompt and no write`, async () => {
+    const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "provider-plant-")));
+    try {
+      const seen = [];
+      const { other } = await plant(
+        home,
+        otherName,
+        async ({ provider, editor, prompts, warnings }) => {
+          await provider.startCommentAtLine(editor.document.uri, 0);
+          seen.push(prompts, warnings);
+        },
+      );
+      assert.deepEqual(seen, [[], []]);
+      assert.equal(fs.existsSync(path.join(other, "info")), false);
+      assert.equal(fs.existsSync(path.join(home, "git", "fake", "info")), false);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+}
