@@ -197,6 +197,7 @@ test("Copy All re-pins line numbers for the prompt only and persists nothing", a
 // The fixture's git ignores the caller's GIT_* variables and the machine's global, system and
 // XDG config (including ~/.config/git/ignore), so a global gitignore for .local-review/
 // cannot refuse the `git add`.
+const IDENT = ["-c", "user.name=t", "-c", "user.email=t@t"];
 const git = (cwd, ...args) => {
   const env = Object.fromEntries(
     Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")),
@@ -416,15 +417,22 @@ test("Copy All never runs a repo-local core.fsmonitor command while checking tra
 
 test("Copy All finds nested repos' threads by discovery when no store was opened this session", async () => {
   const work = tmp("actions-disc-");
+  const mains = [];
   try {
     const { FileCommentStore } = require(OUT + "file-store");
     const child = path.join(work, "child");
     const worktree = path.join(work, "wt");
     const deep = path.join(work, "a", "b", "c", "d");
-    fs.mkdirSync(path.join(child, ".git"), { recursive: true });
-    fs.mkdirSync(worktree);
-    fs.writeFileSync(path.join(worktree, ".git"), "gitdir: /elsewhere\n");
-    fs.mkdirSync(path.join(deep, ".git"), { recursive: true });
+    const main = tmp("actions-main-");
+    mains.push(main);
+    fs.mkdirSync(child);
+    fs.mkdirSync(deep, { recursive: true });
+    git(child, "init", "-q");
+    git(deep, "init", "-q");
+    git(main, "init", "-q");
+    git(main, ...IDENT, "commit", "-q", "--allow-empty", "-m", "init");
+    git(main, "worktree", "add", "-q", worktree, "-b", "wt");
+    assert.ok(fs.statSync(path.join(worktree, ".git")).isFile());
     new FileCommentStore(child).addThread("a", 1, "a", "child thread");
     new FileCommentStore(worktree).addThread("a", 1, "a", "worktree thread");
     new FileCommentStore(deep).addThread("a", 1, "a", "depth four thread");
@@ -442,6 +450,9 @@ test("Copy All finds nested repos' threads by discovery when no store was opened
     });
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
+    for (const main of mains) {
+      fs.rmSync(main, { recursive: true, force: true });
+    }
   }
 });
 
@@ -480,7 +491,8 @@ test("Copy All finds repos under ~/git with no folder open, through a symlinked 
   try {
     const { FileCommentStore } = require(OUT + "file-store");
     const repo = path.join(real, "repo");
-    fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+    fs.mkdirSync(repo);
+    git(repo, "init", "-q");
     new FileCommentStore(repo).addThread("a", 1, "a", "under git home");
     fs.symlinkSync(real, path.join(home, "git"));
     await withSubmit(
@@ -515,7 +527,8 @@ test("Copy All finds repos under an open folder outside ~/git", async () => {
   try {
     const { FileCommentStore } = require(OUT + "file-store");
     const child = path.join(work, "child");
-    fs.mkdirSync(path.join(child, ".git"), { recursive: true });
+    fs.mkdirSync(child);
+    git(child, "init", "-q");
     new FileCommentStore(child).addThread("a", 1, "a", "found under the open folder");
     await withSubmit([work], ({ clipboard }) => {
       assert.match(clipboard[0], /found under the open folder/);
@@ -562,3 +575,54 @@ test("a repo whose path is unsafe for a prompt is reported by name, not dropped 
     fs.rmSync(work, { recursive: true, force: true });
   }
 });
+
+test("a planted .git file that points at another real repo is could not verify, never untracked", async () => {
+  const victim = tmp("actions-victim-");
+  const planted = tmp("actions-planted-");
+  try {
+    const { FileCommentStore } = require(OUT + "file-store");
+    git(victim, "init", "-q");
+    fs.writeFileSync(path.join(planted, ".git"), `gitdir: ${path.join(victim, ".git")}\n`);
+    new FileCommentStore(planted).addThread("a", 1, "a", "planted thread");
+    fs.writeFileSync(path.join(planted, ".local-review", "README.md"), "planted guide\n");
+    await withSubmit([planted], ({ clipboard, warnings }) => {
+      assert.equal(clipboard.length, 0);
+      assert.match(warnings[0], /could not verify/);
+    });
+    assert.equal(
+      fs.readFileSync(path.join(planted, ".local-review", "README.md"), "utf8"),
+      "planted guide\n",
+    );
+  } finally {
+    fs.rmSync(victim, { recursive: true, force: true });
+    fs.rmSync(planted, { recursive: true, force: true });
+  }
+});
+
+for (const [label, plant] of [
+  [
+    "a .git file pointing nowhere",
+    (dir) => fs.writeFileSync(path.join(dir, ".git"), "gitdir: /elsewhere\n"),
+  ],
+  ["an empty .git directory", (dir) => fs.mkdirSync(path.join(dir, ".git"))],
+]) {
+  test(`${label} is could not verify even though git says it is not a repository`, async () => {
+    const root = tmp("actions-fake-");
+    try {
+      const { FileCommentStore } = require(OUT + "file-store");
+      plant(root);
+      new FileCommentStore(root).addThread("a", 1, "a", "fake thread");
+      fs.writeFileSync(path.join(root, ".local-review", "README.md"), "planted guide\n");
+      await withSubmit([root], ({ clipboard, warnings }) => {
+        assert.equal(clipboard.length, 0);
+        assert.match(warnings[0], /could not verify/);
+      });
+      assert.equal(
+        fs.readFileSync(path.join(root, ".local-review", "README.md"), "utf8"),
+        "planted guide\n",
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+}

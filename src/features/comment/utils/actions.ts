@@ -5,7 +5,7 @@ import * as vscode from "vscode";
 import type { CommentAction } from "../types/context";
 import { getCurrentLineInfo } from "../../editor/utils/detector";
 import { discoverReviewRoots } from "./discover";
-import { runGit } from "./git";
+import { ownGitDir, runGit } from "./git";
 import { repin } from "./anchor";
 import { FileCommentStore, isSafePath } from "./file-store";
 import { formatOpenThreads } from "./format";
@@ -31,9 +31,12 @@ const MAX_SOURCE_BYTES = 5 * 1024 * 1024;
 type Tracking = "tracked" | "untracked" | "unknown";
 
 // Whether git tracks anything in this folder's `.local-review/`. Tracked files came from a
-// commit, so they may be someone else's, and so may the README the prompt points at. Only
-// git's own "not a git repository" answer counts as untracked; a missing git, a timeout, a
-// refusal such as dubious ownership or any other failure is unknown, never assumed safe.
+// commit, so they may be someone else's, and so may the README the prompt points at. A folder
+// is untracked only when it has no `.git` entry at all and git itself says it is not in a
+// repository. Whatever git answers for a folder that has a `.git` entry is trusted only once
+// the git dir is vouched for (a cloned repo can ship a `.git` file that points git anywhere);
+// a missing git, a timeout, a refusal such as dubious ownership or any other failure is
+// unknown, never assumed safe.
 const trackingOf = async (root: string): Promise<Tracking> => {
   try {
     const { stdout } = await runGit(root, [
@@ -43,12 +46,23 @@ const trackingOf = async (root: string): Promise<Tracking> => {
       "--",
       ".local-review",
     ]);
+    if (!(await ownGitDir(root).catch(() => undefined))) {
+      return "unknown";
+    }
     return stdout.split("\0").some(Boolean) ? "tracked" : "untracked";
   } catch (error) {
     const { code, stderr } = error as { code?: unknown; stderr?: unknown };
-    return code === 128 && /not a git repository/i.test(String(stderr ?? ""))
-      ? "untracked"
-      : "unknown";
+    const noRepository = code === 128 && /not a git repository/i.test(String(stderr ?? ""));
+    return noRepository && !hasDotGit(root) ? "untracked" : "unknown";
+  }
+};
+
+const hasDotGit = (root: string): boolean => {
+  try {
+    fs.lstatSync(path.join(root, ".git"));
+    return true;
+  } catch (error) {
+    return (error as { code?: unknown }).code !== "ENOENT";
   }
 };
 
