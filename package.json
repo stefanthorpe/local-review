@@ -2,7 +2,7 @@
   "name": "local-review",
   "displayName": "Local Review (file-backed)",
   "description": "Review comments on diff and editor lines, saved as files that AI agents can read, reply to and resolve",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "stefanthorpe",
   "license": "MIT",
   "repository": {
