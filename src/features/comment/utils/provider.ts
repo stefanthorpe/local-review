@@ -1,9 +1,11 @@
 import * as vscode from "vscode";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { addReviewIgnore, FileCommentStore } from "./file-store";
 import { repin } from "./anchor";
+import { resolveRoot } from "./root";
 import { getEditorFileName } from "../../editor/utils/detector";
 import { formatStandardComment } from "./format";
 import type { CommentInputResult } from "./input";
@@ -12,6 +14,7 @@ export interface CommentProvider {
   startCommentAtLine(uri: vscode.Uri, line: number): Promise<void>;
   refreshForEditor(editor?: vscode.TextEditor): void;
   clearAllThreads(): void;
+  roots(): string[];
   dispose(): void;
 }
 
@@ -33,19 +36,26 @@ export const createCommentProvider = (
   let dirTimer: ReturnType<typeof setTimeout> | undefined;
   const stores = new Map<string, FileCommentStore>();
   const storeFor = (uri: vscode.Uri) => {
-    const folder = vscode.workspace.getWorkspaceFolder(uri);
-    if (uri.scheme !== "file" || !folder || folder.uri.scheme !== "file") {
+    if (uri.scheme !== "file") {
       return undefined;
     }
-    let store = stores.get(folder.uri.fsPath);
+    const folder = vscode.workspace.getWorkspaceFolder(uri);
+    const resolved = resolveRoot(
+      uri.fsPath,
+      os.homedir(),
+      folder?.uri.scheme === "file" ? folder.uri.fsPath : undefined,
+    );
+    if (!resolved) {
+      return undefined;
+    }
+    let store = stores.get(resolved.root);
     if (!store) {
-      store = new FileCommentStore(folder.uri.fsPath, (message) => {
+      store = new FileCommentStore(resolved.root, (message) => {
         void vscode.window.showWarningMessage(message);
       });
-      stores.set(folder.uri.fsPath, store);
+      stores.set(resolved.root, store);
     }
-    const relative = path.relative(folder.uri.fsPath, uri.fsPath).split(path.sep).join("/");
-    return { store, relative, folder };
+    return { store, relative: resolved.relative, root: resolved.root };
   };
   const clear = (key: string) => {
     for (const thread of threads.get(key)?.values() ?? []) {
@@ -97,7 +107,7 @@ export const createCommentProvider = (
     }
   };
   // The directory to watch for a review file: its own folder once it exists, otherwise the
-  // nearest existing ancestor up to the workspace folder root, so a first agent-made file is
+  // nearest existing ancestor up to the store root, so a first agent-made file is
   // seen even when .local-review itself does not exist yet.
   const watchTarget = (reviewFile: string, root: string) => {
     for (let dir = path.dirname(reviewFile); ; dir = path.dirname(dir)) {
@@ -138,13 +148,9 @@ export const createCommentProvider = (
       return;
     }
     let exists = true;
-    const reviewFile = path.join(
-      info.folder.uri.fsPath,
-      ".local-review",
-      `${info.relative}.review.json`,
-    );
+    const reviewFile = path.join(info.root, ".local-review", `${info.relative}.review.json`);
     const key = uri.toString();
-    const target = watchTarget(reviewFile, info.folder.uri.fsPath);
+    const target = watchTarget(reviewFile, info.root);
     if (target) {
       watchDirectory(target, key);
       // Once the document's own directory exists, its earlier ancestor watch is redundant.
@@ -318,14 +324,16 @@ export const createCommentProvider = (
     }
     const info = storeFor(uri);
     if (!info || !editor) {
-      void vscode.window.showWarningMessage("No workspace folder found");
+      void vscode.window.showWarningMessage(
+        "Comments are only saved for files under ~/git or the open folder.",
+      );
       return;
     }
     const result = await showCommentInput();
     if (!result) {
       return;
     }
-    const dir = path.join(info.folder.uri.fsPath, ".local-review");
+    const dir = path.join(info.root, ".local-review");
     const first = !fs.existsSync(path.join(dir, "README.md"));
     try {
       info.store.addThread(info.relative, line + 1, editor.document.lineAt(line).text, result.text);
@@ -340,7 +348,7 @@ export const createCommentProvider = (
           "Add",
         );
         if (answer === "Add") {
-          addReviewIgnore(info.folder.uri.fsPath);
+          addReviewIgnore(info.root);
         }
       } catch (error) {
         void vscode.window.showWarningMessage(`Failed to update .gitignore: ${error}`);
@@ -377,6 +385,7 @@ export const createCommentProvider = (
     startCommentAtLine,
     refreshForEditor,
     clearAllThreads,
+    roots: () => [...stores.keys()],
     dispose: () => {
       clearAllThreads();
       controller.dispose();

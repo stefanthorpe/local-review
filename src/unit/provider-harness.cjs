@@ -18,7 +18,7 @@ const withProvider = async (body, options = {}) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-robust-"));
   const uri = {
     scheme: "file",
-    fsPath: path.join(root, "sub", "a"),
+    fsPath: options.filePath ?? path.join(root, "sub", "a"),
     toString() {
       return this.fsPath;
     },
@@ -39,7 +39,8 @@ const withProvider = async (body, options = {}) => {
   };
   const vscode = {
     workspace: {
-      getWorkspaceFolder: () => ({ uri: { scheme: "file", fsPath: root } }),
+      getWorkspaceFolder: () =>
+        options.noWorkspace ? undefined : { uri: { scheme: "file", fsPath: root } },
       createFileSystemWatcher: () => silent,
       onDidChangeTextDocument: disposable,
       onDidCloseTextDocument: (f) => {
@@ -124,4 +125,19 @@ const withProvider = async (body, options = {}) => {
   }
 };
 
-module.exports = { withProvider, wait, until };
+// Points os.homedir() at `home` for the duration of `body` (it reads $HOME on POSIX).
+const withHome = async (home, body) => {
+  const saved = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    await body();
+  } finally {
+    if (saved === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = saved;
+    }
+  }
+};
+
+module.exports = { withProvider, withHome, wait, until };

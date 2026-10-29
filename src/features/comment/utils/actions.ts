@@ -62,19 +62,40 @@ const sourceLines = (root: string, file: string): string[] | undefined => {
 };
 
 export const submitComments: CommentAction = async (ctx) => {
-  if (!vscode.workspace.workspaceFolders?.length) {
-    vscode.window.showWarningMessage("No workspace folder found");
+  // Workspace folders plus every root the provider stored comments in this session (roots
+  // under ~/git need not be open folders), deduplicated by real path.
+  const candidates = [
+    ...(vscode.workspace.workspaceFolders ?? [])
+      .filter((folder) => folder.uri.scheme === "file")
+      .map((folder) => ({ name: folder.name, root: folder.uri.fsPath })),
+    ...(ctx.commentProvider?.roots() ?? []).map((root) => ({ name: path.basename(root), root })),
+  ];
+  const seen = new Set<string>();
+  const folders = candidates.filter(({ root }) => {
+    let real = root;
+    try {
+      real = fs.realpathSync(root);
+    } catch {
+      // A root that no longer exists is still listed once, by its own path.
+    }
+    if (seen.has(real)) {
+      return false;
+    }
+    seen.add(real);
+    return true;
+  });
+  if (!folders.length) {
+    vscode.window.showWarningMessage(
+      "Comments are only saved for files under ~/git or the open folder.",
+    );
     return;
   }
-  const folders = vscode.workspace.workspaceFolders.filter(
-    (folder) => folder.uri.scheme === "file",
-  );
   const guideProblems: string[] = [];
   const problems: string[] = [];
   const collect = (message: string) => problems.push(message);
   const reviewed = [];
   for (const folder of folders) {
-    const root = folder.uri.fsPath;
+    const root = folder.root;
     const store = new FileCommentStore(root, collect);
     const files = store.listAll();
     if (!files.some((file) => file.threads.length)) {
