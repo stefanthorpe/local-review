@@ -1,5 +1,5 @@
 ---
-version: 5
+version: 6
 ---
 
 # File-Backed Review Comments - Architecture Design
@@ -191,17 +191,41 @@ and the containing workspace folder):
    ancestor that has a `.git` entry, a directory or a file (worktrees and clones with a
    `.git` file count), stopping at `<home>/git` itself, which is a root only if it has
    `.git`. Nearest wins, so a child clone or worktree inside a parent repo gets its own
-   root.
+   root. `<home>/git` is resolved as one path, so it may itself be a symlink. A `.git`
+   under a `node_modules` folder is never a root (a dependency can ship one), and the walk
+   continues past it. A dangling or unreadable `.git` is skipped the same way, so the walk
+   climbs to the parent repository.
 2. If that finds no repository, or the file is not under `~/git`, the root is the
    workspace folder containing the file, as before.
 3. Otherwise there is no root and the comment is refused.
 
 The relative path is the file relative to the root with `/` separators; a path that would
-start with `..` means no root. Stores are keyed by root. Copy All collects from the
-union of the file-scheme workspace folders and every root the provider created a store
-for this session, deduplicated by real path. The fallback `fs.watch` covers roots
-outside the workspace, since the extension's `FileSystemWatcher` sees only workspace
-folders.
+start with `..` means no root. Stores are keyed by root. The fallback `fs.watch` covers
+roots outside the workspace, since the extension's `FileSystemWatcher` sees only
+workspace folders.
+
+**Copy All finds roots from four sources**, deduplicated by real path, so it still works
+after a reload when no store has been opened yet:
+
+1. The file-scheme workspace folders.
+2. Discovery: every `.local-review` directory at most 5 levels below a workspace folder
+   (the bound the agents' `find -maxdepth` uses), skipping `node_modules`, `.git` and
+   `.venv` and not following symlinked directories. Only a folder holding a `.git` entry
+   (directory or file), or the workspace folder itself, counts.
+3. Persisted roots: each root a comment was written under (add, reply, resolve, reopen,
+   delete; viewing does not count) is kept in the extension's global state under one key.
+   Entries whose `.local-review` directory no longer exists are dropped and removed from
+   the state when Copy All reads it.
+4. Roots whose store the provider opened this session.
+
+**No migration.** Threads written under the old rule at a workspace root, for files that
+belong to a nested repository, are not moved. The editor no longer shows them, because it
+now looks in the nested repository's own `.local-review`; Copy All still lists them while
+the workspace folder is open.
+
+Every git command the extension runs uses `-c core.fsmonitor=false`, because a resolved
+root can be any `.git` under `~/git` and git runs repo-local config during read-only
+commands.
 
 ## Behaviour Changes
 
@@ -222,7 +246,10 @@ folders.
   Thread excerpts are fenced as untrusted review text. Errors from several files
   collapse into one summary warning, led by any guide failure; when nothing is copied
   because folders were skipped, the message says how many.
-- **First use** in a root offers to add `.local-review/` to `.gitignore`.
+- **First use** in a root checks `git check-ignore`; when `.local-review/` is already
+  ignored nothing is asked. Otherwise it offers, naming the root, to add the line to the
+  repository's private `info/exclude` (the common git dir, so a worktree shares it), never
+  to a tracked `.gitignore`. A folder with no repository keeps the `.gitignore` offer.
 
 ## Error Handling
 
@@ -240,7 +267,11 @@ folders.
   attached as its `cause`. The guide is replaced the same way, without the directory sync.
 - **Left side of a diff** (`git:` / `diff:` URIs): the warning says the side is
   read-only and not file-backed.
-- **No root:** commands warn "Comments are only saved for files under ~/git or the open folder." and do nothing.
+- **No root:** commands warn and do nothing. The text depends on the cause: no saved file
+  ("Save the file first; comments are stored next to saved files."), a `~/git` file in no
+  repository and outside the workspace ("Comments are saved in the git repository that
+  holds the file; this file under ~/git is not in one."), or otherwise "Comments are only
+  saved for files in a git repository under ~/git, or under the open folder."
 
 ## Testing
 
@@ -255,6 +286,16 @@ TDD per the RS universal rules.
   file updates the rendered thread; a self-write does not double-render.
 
 ## Changelog
+
+### v6 — 2026-10-29
+
+- A symlinked `~/git` resolves; a `.git` under `node_modules` is never a root.
+- Copy All no longer depends on roots opened this session: it discovers `.local-review`
+  folders under workspace folders and reads persisted roots; corrected the earlier claim
+  that it used every root stored this session. Added a no-migration note.
+- Every git call disables `core.fsmonitor`.
+- First-use ignore offer uses `check-ignore` and `info/exclude`, per root.
+- No-root messages split by cause; fallback roots are dropped when their folder closes.
 
 ### v5 — 2026-10-29
 
