@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import * as vscode from "vscode";
 import type { CommentAction } from "../types/context";
 import { getCurrentLineInfo } from "../../editor/utils/detector";
@@ -33,17 +34,22 @@ export const submitComments: CommentAction = async (ctx) => {
   const reviewed = folders.map((folder) => {
     const store = new FileCommentStore(folder.uri.fsPath, collect);
     const files = store.listAll();
-    if (files.some((file) => file.threads.length)) {
-      // The prompt tells the agent to trust this folder's README, and a cloned repo can
-      // ship its own, so make it the canonical guide first or leave the folder out.
-      try {
-        store.ensureGuide();
-      } catch (error) {
-        problems.push(`Skipped ${folder.name}: cannot install the Local Review guide: ${error}`);
-        return { name: folder.name, files: [] };
-      }
+    if (!files.some((file) => file.threads.length)) {
+      return { name: folder.name, files };
     }
-    return { name: folder.name, files };
+    // The prompt points the agent at this folder's README, and a cloned repo can ship its
+    // own, so make it the canonical guide first or leave the folder out of the prompt.
+    try {
+      store.ensureGuide();
+    } catch (error) {
+      problems.push(`Skipped ${folder.name}: cannot install the Local Review guide: ${error}`);
+      return { name: folder.name, files: [] };
+    }
+    return {
+      name: folder.name,
+      files,
+      guidePath: path.join(folder.uri.fsPath, ".local-review", "README.md"),
+    };
   });
   if (problems.length) {
     void vscode.window.showWarningMessage(

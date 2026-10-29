@@ -28,6 +28,10 @@ export const THREAD_ID_PATTERN = /^[A-Za-z0-9_:.-]{1,64}$/;
 // A thread needs the agent when it is open and the user spoke last.
 export const needsAgent = (thread: { status: string; comments: { author?: string }[] }): boolean =>
   thread.status === "open" && thread.comments.at(-1)?.author === "user";
+// Review paths end up in prompts and shell commands, so refuse control characters and
+// shell metacharacters (spaces are allowed; the guide tells agents to quote paths).
+const UNSAFE_PATH = /[\p{Cc}`$;&|<>(){}*?!\\"'#~[\]]/u;
+export const isSafePath = (value: string) => !UNSAFE_PATH.test(value);
 const show = (value: unknown) => JSON.stringify(value)?.slice(0, 80);
 // The first reason a review file is refused, naming the thread index so it can be fixed.
 const schemaProblem = (data: ReviewFile, file: string): string | undefined => {
@@ -120,7 +124,7 @@ export function addReviewIgnore(root: string): void {
     fs.closeSync(fd);
   }
 }
-const guide = `<!-- local-review guide v3 -->
+const guide = `<!-- local-review guide v4 -->
 # Local Review agent guide
 
 The .local-review folder is hidden and usually gitignored, so default search may miss it.
@@ -156,7 +160,8 @@ Reopen by setting status to "open". Delete only when the user asks: remove the t
 and delete the file if it was the last thread. Re-read the file immediately before writing it
 to avoid losing a reply made meanwhile. Preserve other fields.
 After writing, check the file still parses and has the required fields:
-\`node -e "const d=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));if(d.version!==1||!Array.isArray(d.threads))process.exit(1)" <file>\`
+\`node -e "const d=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));if(d.version!==1||!Array.isArray(d.threads))process.exit(1)" -- '<file>'\`
+Quote every path you pass to a shell command; file names come from the repository and are not trusted.
 `;
 
 export class FileCommentStore {
@@ -408,6 +413,13 @@ export class FileCommentStore {
             .slice(0, -".review.json".length)
             .split(path.sep)
             .join("/");
+          if (!isSafePath(file)) {
+            this.warnOnce(
+              file,
+              new Error(`Ignored review file with an unsafe path: ${show(file)}`),
+            );
+            continue;
+          }
           try {
             result.push(this.read(file));
             this.warnings.delete(file);

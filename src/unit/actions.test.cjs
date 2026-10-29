@@ -54,6 +54,7 @@ test("copy-all overwrites a foreign README.md with the canonical guide before em
     await withSubmit([root], ({ clipboard }) => {
       assert.equal(clipboard.length, 1);
       assert.match(clipboard[0], /fix this/);
+      assert.ok(clipboard[0].includes(readme));
     });
     assert.equal(fs.readFileSync(readme, "utf8"), canonical);
   } finally {
@@ -78,6 +79,8 @@ test("copy-all omits a folder whose guide cannot be installed and warns once wit
       assert.equal(clipboard.length, 1);
       assert.equal(clipboard[0].includes("bad folder comment"), false);
       assert.match(clipboard[0], /good folder comment/);
+      assert.equal(clipboard[0].includes(path.join(bad, ".local-review")), false);
+      assert.ok(clipboard[0].includes(path.join(good, ".local-review", "README.md")));
       assert.equal(warnings.length, 1);
       assert.match(warnings[0], /^2 Local Review problems; first:/);
     });
