@@ -305,7 +305,9 @@ test("thread ids outside the strict pattern refuse the whole file, like other ma
       assert.deepEqual(store.listForFile("a"), []);
       assert.deepEqual(store.listAll(), []);
     }
-    assert.equal(warnings.length, 1);
+    // Each refusal names its own bad id and thread index, so each is a distinct warning.
+    assert.equal(warnings.length, bad.length);
+    assert.ok(warnings.every((message) => /thread 0 id .* must match/.test(message)));
     for (const id of ["t:fix:1", "t_8f2a", "a.b-c", "x".repeat(64)]) {
       const data = structuredClone(original);
       data.threads[0].id = id;

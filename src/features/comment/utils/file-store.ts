@@ -28,6 +28,57 @@ export const THREAD_ID_PATTERN = /^[A-Za-z0-9_:.-]{1,64}$/;
 // A thread needs the agent when it is open and the user spoke last.
 export const needsAgent = (thread: { status: string; comments: { author?: string }[] }): boolean =>
   thread.status === "open" && thread.comments.at(-1)?.author === "user";
+const show = (value: unknown) => JSON.stringify(value)?.slice(0, 80);
+// The first reason a review file is refused, naming the thread index so it can be fixed.
+const schemaProblem = (data: ReviewFile, file: string): string | undefined => {
+  if (!data || typeof data !== "object" || data.version !== 1) {
+    return "version must be the integer 1";
+  }
+  if (data.file !== file) {
+    return `file must equal ${show(file)}, found ${show(data.file)}`;
+  }
+  if (!Array.isArray(data.threads)) {
+    return "threads must be an array";
+  }
+  const seen = new Set<string>();
+  for (const [i, t] of data.threads.entries()) {
+    const at = `thread ${i}`;
+    if (!t || typeof t !== "object") {
+      return `${at} must be an object`;
+    }
+    if (typeof t.id !== "string" || !THREAD_ID_PATTERN.test(t.id)) {
+      return `${at} id ${show(t.id)} must match ${THREAD_ID_PATTERN}`;
+    }
+    if (seen.has(t.id)) {
+      return `${at} id ${show(t.id)} is a duplicate`;
+    }
+    seen.add(t.id);
+    if (!Number.isInteger(t.line) || t.line <= 0) {
+      return `${at} (${t.id}) line must be a positive integer`;
+    }
+    if (typeof t.anchor !== "string") {
+      return `${at} (${t.id}) anchor must be a string`;
+    }
+    if (t.status !== "open" && t.status !== "resolved") {
+      return `${at} (${t.id}) status must be "open" or "resolved"`;
+    }
+    if (!Array.isArray(t.comments)) {
+      return `${at} (${t.id}) comments must be an array`;
+    }
+    for (const [j, c] of t.comments.entries()) {
+      if (
+        !c ||
+        typeof c.id !== "string" ||
+        typeof c.author !== "string" ||
+        typeof c.body !== "string" ||
+        typeof c.at !== "string"
+      ) {
+        return `${at} (${t.id}) comment ${j} needs string id, author, body and at`;
+      }
+    }
+  }
+  return undefined;
+};
 const id = (prefix: string) => `${prefix}_${randomBytes(12).toString("hex")}`;
 export function addReviewIgnore(root: string): void {
   const name = path.join(root, ".gitignore");
@@ -175,31 +226,9 @@ export class FileCommentStore {
     }
     try {
       const data = JSON.parse(raw) as ReviewFile;
-      if (
-        !data ||
-        data.version !== 1 ||
-        data.file !== file ||
-        !Array.isArray(data.threads) ||
-        new Set(data.threads.map((t) => t.id)).size !== data.threads.length ||
-        !data.threads.every(
-          (t) =>
-            typeof t.id === "string" &&
-            THREAD_ID_PATTERN.test(t.id) &&
-            Number.isInteger(t.line) &&
-            t.line > 0 &&
-            typeof t.anchor === "string" &&
-            (t.status === "open" || t.status === "resolved") &&
-            Array.isArray(t.comments) &&
-            t.comments.every(
-              (c) =>
-                typeof c.id === "string" &&
-                typeof c.author === "string" &&
-                typeof c.body === "string" &&
-                typeof c.at === "string",
-            ),
-        )
-      ) {
-        throw new Error("Invalid review schema or version");
+      const problem = schemaProblem(data, file);
+      if (problem) {
+        throw new Error(problem);
       }
       return data;
     } catch (error) {
@@ -225,6 +254,7 @@ export class FileCommentStore {
     try {
       try {
         fs.writeFileSync(fd, JSON.stringify(data, null, 2) + "\n");
+        fs.fsyncSync(fd);
       } finally {
         fs.closeSync(fd);
       }
@@ -334,15 +364,20 @@ export class FileCommentStore {
     data.threads = data.threads.filter((t) => t.id !== threadId);
     this.save(data);
   }
-  listForFile(file: string): ReviewThread[] {
+  // Undefined means the file exists but cannot be read or is refused, which callers must
+  // tell apart from a file with no threads.
+  readThreads(file: string): ReviewThread[] | undefined {
     try {
       const result = this.read(file).threads;
       this.warnings.delete(file);
       return result;
     } catch (error) {
       this.warnOnce(file, error);
-      return [];
+      return undefined;
     }
+  }
+  listForFile(file: string): ReviewThread[] {
+    return this.readThreads(file) ?? [];
   }
   private warnOnce(file: string, error: unknown): void {
     const message = String(error);

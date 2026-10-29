@@ -148,7 +148,11 @@ export const createCommentProvider = (
         exists = false;
       }
     }
-    const values = exists ? info.store.listForFile(info.relative) : [];
+    const values = exists ? info.store.readThreads(info.relative) : [];
+    if (!values) {
+      // A refused or unreadable file keeps what is already rendered until it is fixed.
+      return;
+    }
     const lines = Array.from(
       { length: editor.document.lineCount },
       (_, i) => editor.document.lineAt(i).text,
@@ -271,6 +275,12 @@ export const createCommentProvider = (
   );
   const startCommentAtLine = async (uri: vscode.Uri, line: number) => {
     const editor = vscode.window.activeTextEditor;
+    if (uri.scheme === "git" || uri.scheme === "diff") {
+      void vscode.window.showWarningMessage(
+        "This side of the diff is read-only and not file-backed; comment on the working-tree file instead.",
+      );
+      return;
+    }
     const info = storeFor(uri);
     if (!info || !editor) {
       void vscode.window.showWarningMessage("No workspace folder found");
@@ -282,7 +292,16 @@ export const createCommentProvider = (
     }
     const dir = path.join(info.folder.uri.fsPath, ".local-review");
     const first = !fs.existsSync(path.join(dir, "README.md"));
-    info.store.addThread(info.relative, line + 1, editor.document.lineAt(line).text, result.text);
+    try {
+      info.store.addThread(info.relative, line + 1, editor.document.lineAt(line).text, result.text);
+    } catch (error) {
+      // Keep what the user typed: the save was refused, so offer it back twice.
+      await copyToClipboard(result.text);
+      void vscode.window.showWarningMessage(
+        `Could not save your comment: ${error}. Your text was copied to the clipboard: ${result.text}`,
+      );
+      return;
+    }
     if (first) {
       try {
         const answer = await vscode.window.showInformationMessage(
