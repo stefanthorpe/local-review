@@ -8,7 +8,7 @@ const Module = require("node:module");
 const OUT = "../../out/features/comment/utils/";
 const { execFileSync } = require("node:child_process");
 
-const withSubmit = async (folders, body, copyResult = true) => {
+const withSubmit = async (folders, body, copyResult = true, knownRoots = []) => {
   const warnings = [];
   const infos = [];
   const clipboard = [];
@@ -33,6 +33,7 @@ const withSubmit = async (folders, body, copyResult = true) => {
     delete require.cache[require.resolve(OUT + "actions")];
     const { submitComments } = require(OUT + "actions");
     await submitComments({
+      commentProvider: { roots: () => knownRoots },
       copyToClipboard: async (text) => {
         clipboard.push(text);
         return copyResult;
@@ -178,10 +179,17 @@ test("Copy All re-pins line numbers for the prompt only and persists nothing", a
   }
 });
 
+// The fixture's git ignores the caller's GIT_* variables and the machine's global, system and
+// XDG config (including ~/.config/git/ignore), so a global gitignore for .local-review/
+// cannot refuse the `git add`.
 const git = (cwd, ...args) => {
   const env = Object.fromEntries(
     Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")),
   );
+  env.GIT_CONFIG_GLOBAL = os.devNull;
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  env.HOME = cwd;
+  env.XDG_CONFIG_HOME = path.join(cwd, ".no-xdg-config");
   execFileSync("git", args, { cwd, env, stdio: "ignore" });
 };
 
@@ -209,4 +217,66 @@ test("Copy All warns when review files are tracked by git but still copies the p
     fs.rmSync(tracked, { recursive: true, force: true });
     fs.rmSync(ignored, { recursive: true, force: true });
   }
+});
+
+test("Copy All includes a known root that is not a workspace folder and works with no folders open", async () => {
+  const known = fs.mkdtempSync(path.join(os.tmpdir(), "actions-known-"));
+  const open = fs.mkdtempSync(path.join(os.tmpdir(), "actions-open-"));
+  try {
+    const { FileCommentStore } = require(OUT + "file-store");
+    new FileCommentStore(known).addThread("a", 1, "a", "known root comment");
+    new FileCommentStore(open).addThread("b", 1, "b", "open folder comment");
+    await withSubmit(
+      [],
+      ({ clipboard, warnings }) => {
+        assert.equal(clipboard.length, 1);
+        assert.match(clipboard[0], /known root comment/);
+        assert.deepEqual(warnings, []);
+      },
+      true,
+      [known],
+    );
+    await withSubmit(
+      [open],
+      ({ clipboard }) => {
+        assert.match(clipboard[0], /known root comment/);
+        assert.match(clipboard[0], /open folder comment/);
+      },
+      true,
+      [known],
+    );
+  } finally {
+    fs.rmSync(known, { recursive: true, force: true });
+    fs.rmSync(open, { recursive: true, force: true });
+  }
+});
+
+test("Copy All counts a root once when it is both a workspace folder and a known root, even via a symlink", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "actions-dedup-"));
+  const link = `${root}-link`;
+  try {
+    const { FileCommentStore } = require(OUT + "file-store");
+    new FileCommentStore(root).addThread("a", 1, "a", "only once");
+    fs.symlinkSync(root, link);
+    await withSubmit(
+      [root],
+      ({ clipboard }) => {
+        assert.match(clipboard[0], /^Address the 1 open review thread\./);
+      },
+      true,
+      [root, link],
+    );
+  } finally {
+    fs.rmSync(link, { force: true });
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Copy All with no folders and no known roots explains where comments are saved", async () => {
+  await withSubmit([], ({ clipboard, warnings }) => {
+    assert.equal(clipboard.length, 0);
+    assert.deepEqual(warnings, [
+      "Comments are only saved for files under ~/git or the open folder.",
+    ]);
+  });
 });
