@@ -232,7 +232,7 @@ test("every review write installs or upgrades the guide without following symlin
     const store = new FileCommentStore(root, (message) => warnings.push(message));
     const thread = store.addThread("a", 1, "a", "a");
     const guide = path.join(root, ".local-review/README.md");
-    assert.match(fs.readFileSync(guide, "utf8"), /<!-- local-review guide v4 -->/);
+    assert.match(fs.readFileSync(guide, "utf8"), /<!-- local-review guide v5 -->/);
     fs.writeFileSync(guide, "old guide");
     store.reply("a", thread.id, "agent", "reply");
     assert.match(fs.readFileSync(guide, "utf8"), /find \.local-review -name '\*\.review\.json'/);
@@ -623,10 +623,179 @@ test("the guide states the needs-agent rule, id pattern, line semantics, self-ch
     assert.match(guide, /refuse the whole file/);
     assert.match(guide, /locate the code by its\s+`anchor` text near that line/);
     assert.equal(guide.includes("the extension re-pins"), false);
-    assert.match(guide, /JSON\.parse\(require\('fs'\)/);
-    assert.match(guide, /" -- '<file>'`/);
+    assert.match(guide, /node -e "[^\n"]*" -- '<file>'/);
     assert.match(guide, /Quote every path/);
     assert.match(guide, /render as Markdown/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+const patched = (name, wrapper, body) => {
+  const original = fs[name];
+  fs[name] = wrapper(original);
+  try {
+    return body();
+  } finally {
+    fs[name] = original;
+  }
+};
+const code = (value) => Object.assign(new Error(`${value} injected`), { code: value });
+
+test("a failed save keeps its first error and attaches a cleanup failure as the cause", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "review-"));
+  try {
+    const store = new FileCommentStore(root);
+    store.addThread("a", 1, "a", "seed");
+    patched(
+      "renameSync",
+      () => () => {
+        throw code("EXDEV");
+      },
+      () =>
+        patched(
+          "unlinkSync",
+          (original) =>
+            (file, ...rest) => {
+              if (String(file).endsWith(".tmp")) {
+                throw code("EACCES");
+              }
+              return original(file, ...rest);
+            },
+          () =>
+            assert.throws(
+              () => store.addThread("a", 1, "a", "second"),
+              (error) => {
+                assert.equal(error.code, "EXDEV");
+                assert.equal(error.cause.code, "EACCES");
+                return true;
+              },
+            ),
+        ),
+    );
+    assert.equal(store.listForFile("a").length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("save fsyncs the directory after the rename and tolerates platforms that refuse", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "review-"));
+  try {
+    const store = new FileCommentStore(root);
+    const events = [];
+    patched(
+      "renameSync",
+      (original) => (from, to) => {
+        events.push("rename");
+        return original(from, to);
+      },
+      () =>
+        patched(
+          "fsyncSync",
+          (original) => (fd) => {
+            if (fs.fstatSync(fd).isDirectory()) {
+              events.push("fsync-dir");
+              throw code("EINVAL");
+            }
+            return original(fd);
+          },
+          () => store.addThread("a", 1, "a", "first"),
+        ),
+    );
+    assert.deepEqual(events.slice(0, 2), ["rename", "fsync-dir"]);
+    assert.equal(store.listForFile("a").length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the guide is replaced through a temp file, so a failed write leaves the old guide intact", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "review-"));
+  try {
+    const store = new FileCommentStore(root);
+    store.addThread("a", 1, "a", "seed");
+    const guide = path.join(root, ".local-review/README.md");
+    fs.writeFileSync(guide, "old guide");
+    patched(
+      "writeFileSync",
+      (original) =>
+        (file, ...rest) => {
+          if (typeof file === "number") {
+            throw code("ENOSPC");
+          }
+          return original(file, ...rest);
+        },
+      () => assert.throws(() => store.ensureGuide(), /ENOSPC/),
+    );
+    assert.equal(fs.readFileSync(guide, "utf8"), "old guide");
+    assert.deepEqual(fs.readdirSync(path.dirname(guide)).sort(), ["README.md", "a.review.json"]);
+    store.ensureGuide();
+    assert.match(fs.readFileSync(guide, "utf8"), /local-review guide/);
+    assert.deepEqual(fs.readdirSync(path.dirname(guide)).sort(), ["README.md", "a.review.json"]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+const selfCheck = (root, file) => {
+  const guide = fs.readFileSync(path.join(root, ".local-review/README.md"), "utf8");
+  const line = guide.split("\n").find((l) => l.startsWith("`node -e "));
+  assert.ok(line, "the guide has a one-line self-check");
+  const command = line.slice(1, -1).replace("'<file>'", "'" + file.replace(/'/g, "'\\''") + "'");
+  return spawnSync("bash", ["-c", command], { cwd: root, encoding: "utf8" });
+};
+
+test("the guide's self-check applies the schema the extension enforces", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "review-"));
+  try {
+    const store = new FileCommentStore(root);
+    store.addThread("src/it's [x].ts", 3, "code", "fix");
+    const rel = ".local-review/src/it's [x].ts.review.json";
+    const abs = path.join(root, rel);
+    assert.equal(selfCheck(root, rel).status, 0);
+    const valid = JSON.parse(fs.readFileSync(abs, "utf8"));
+    const broken = (mutate) => {
+      const copy = structuredClone(valid);
+      mutate(copy);
+      fs.writeFileSync(abs, JSON.stringify(copy));
+      return selfCheck(root, rel);
+    };
+    const cases = [
+      [(d) => delete d.threads[0].comments[0].at, /thread 0.*comment 0/],
+      [(d) => (d.version = 2), /version/],
+      [(d) => (d.file = "other.ts"), /file must equal/],
+      [(d) => (d.threads[0].id = "bad id"), /id/],
+      [(d) => d.threads.push(structuredClone(d.threads[0])), /duplicate/],
+      [(d) => (d.threads[0].line = 0), /line/],
+      [(d) => (d.threads[0].line = 1.5), /line/],
+      [(d) => (d.threads[0].anchor = 4), /anchor/],
+      [(d) => (d.threads[0].status = "done"), /status/],
+      [(d) => (d.threads[0].comments[0].author = 1), /comment 0/],
+    ];
+    for (const [mutate, expected] of cases) {
+      const result = broken(mutate);
+      assert.equal(result.status, 1, String(mutate));
+      assert.match(result.stdout, expected);
+    }
+    fs.writeFileSync(abs, "{broken");
+    assert.notEqual(selfCheck(root, rel).status, 0);
+    fs.writeFileSync(abs, JSON.stringify(valid));
+    assert.equal(selfCheck(root, rel).status, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the guide example marks a fixed thread resolved, matching the prompt's policy", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "review-"));
+  try {
+    new FileCommentStore(root).addThread("a", 1, "a", "a");
+    const guide = fs.readFileSync(path.join(root, ".local-review/README.md"), "utf8");
+    const example = /```json\n([\s\S]*?)```/.exec(guide)[1];
+    const thread = JSON.parse(example).threads[0];
+    assert.equal(thread.comments.at(-1).author, "claude");
+    assert.equal(thread.status, "resolved");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

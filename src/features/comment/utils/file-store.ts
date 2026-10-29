@@ -86,6 +86,14 @@ const schemaProblem = (data: ReviewFile, file: string): string | undefined => {
   }
   return undefined;
 };
+// Keeps the first failure as the thrown error and records a later cleanup failure on it.
+const withCause = (failure: unknown, cleanup: unknown): unknown => {
+  if (!(failure instanceof Error)) {
+    return failure ?? cleanup;
+  }
+  failure.cause = failure.cause ? new AggregateError([failure.cause, cleanup]) : cleanup;
+  return failure;
+};
 const id = (prefix: string) => `${prefix}_${randomBytes(12).toString("hex")}`;
 export function addReviewIgnore(root: string): void {
   const name = path.join(root, ".gitignore");
@@ -127,7 +135,31 @@ export function addReviewIgnore(root: string): void {
     fs.closeSync(fd);
   }
 }
-const guide = `<!-- local-review guide v4 -->
+// One shell-safe line (no double quote, backslash, dollar or backtick) that mirrors
+// schemaProblem and prints the first problem. Run from the folder root.
+const SELF_CHECK = [
+  "const f=require('fs');const p=process.argv[1];",
+  "const bad=m=>{console.log(p+': '+m);process.exit(1)};",
+  "const s=x=>typeof x==='string';",
+  "if(!p.startsWith('.local-review/')||!p.endsWith('.review.json'))bad('run from the folder root with the .local-review/... path');",
+  "let d;try{d=JSON.parse(f.readFileSync(p,'utf8'))}catch(e){bad(String(e))}",
+  "const w=p.slice(14,-12);",
+  "if(!d||d.version!==1)bad('version must be the integer 1');",
+  "if(d.file!==w)bad('file must equal '+JSON.stringify(w));",
+  "if(!Array.isArray(d.threads))bad('threads must be an array');",
+  "const seen=new Set();",
+  "d.threads.forEach((t,i)=>{const a='thread '+i;",
+  "if(!t||typeof t!=='object')bad(a+' must be an object');",
+  "if(!s(t.id)||!t.id||t.id.length>64||/[^A-Za-z0-9_:.-]/.test(t.id))bad(a+' id must match the id pattern');",
+  "if(seen.has(t.id))bad(a+' id is a duplicate');seen.add(t.id);",
+  "if(!Number.isInteger(t.line)||t.line<=0)bad(a+' line must be a positive integer');",
+  "if(!s(t.anchor))bad(a+' anchor must be a string');",
+  "if(t.status!=='open'&&t.status!=='resolved')bad(a+' status must be open or resolved');",
+  "if(!Array.isArray(t.comments))bad(a+' comments must be an array');",
+  "t.comments.forEach((c,j)=>{if(!c||!s(c.id)||!s(c.author)||!s(c.body)||!s(c.at))bad(a+' comment '+j+' needs string id, author, body and at')})});",
+  "console.log('ok')",
+].join("");
+const guide = `<!-- local-review guide v5 -->
 # Local Review agent guide
 
 The .local-review folder is hidden and usually gitignored, so default search may miss it.
@@ -142,7 +174,7 @@ Example .local-review/src/extension.ts.review.json:
   "version": 1,
   "file": "src/extension.ts",
   "threads": [{
-    "id": "t_8f2a", "line": 42, "anchor": "const ctx = init();", "status": "open",
+    "id": "t_8f2a", "line": 42, "anchor": "const ctx = init();", "status": "resolved",
     "comments": [
       { "id": "c_01", "author": "user", "body": "check the initialization", "at": "2026-10-28T14:02:11Z" },
       { "id": "c_02", "author": "claude", "body": "Fixed: moved init before registration.", "at": "2026-10-28T14:05:40Z" }
@@ -162,8 +194,9 @@ Resolve by setting status to "resolved" once the requested change is made; agent
 Reopen by setting status to "open". Delete only when the user asks: remove the thread object,
 and delete the file if it was the last thread. Re-read the file immediately before writing it
 to avoid losing a reply made meanwhile. Preserve other fields.
-After writing, check the file still parses and has the required fields:
-\`node -e "const d=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));if(d.version!==1||!Array.isArray(d.threads))process.exit(1)" -- '<file>'\`
+After writing, run this from the folder root, passing the file's .local-review/... path. It checks the same
+rules the extension enforces and prints the first problem:
+\`node -e "${SELF_CHECK}" -- '<file>'\`
 Quote every path you pass to a shell command; file names come from the repository and are not trusted.
 `;
 
@@ -274,22 +307,43 @@ export class FileCommentStore {
         fs.unlinkSync(temp);
       } catch (cleanupError) {
         if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") {
-          failure = cleanupError;
+          failure = withCause(failure, cleanupError);
         }
       }
     }
     if (failure) {
       throw failure instanceof Error ? failure : new Error(String(failure));
     }
+    this.syncDirectory(path.dirname(name));
     try {
       this.ensureGuide();
     } catch (error) {
       this.warn(`Failed to write Local Review guide: ${error}`);
     }
   }
+  // Best effort: make the rename durable. Platforms that cannot open or sync a directory
+  // refuse with EINVAL, EISDIR or EPERM, which is fine; anything else is only reported,
+  // because the write itself has already succeeded.
+  private syncDirectory(dir: string): void {
+    try {
+      const fd = fs.openSync(dir, fs.constants.O_RDONLY);
+      try {
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch (error) {
+      if (!["EINVAL", "EISDIR", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+        this.warn(`Failed to sync ${dir}: ${error}`);
+      }
+    }
+  }
   ensureGuide(): void {
-    const name = path.join(this.root, ".local-review", "README.md");
-    let flags = fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK;
+    const dir = path.join(this.root, ".local-review");
+    const name = path.join(dir, "README.md");
+    if (fs.lstatSync(dir).isSymbolicLink()) {
+      throw new Error(`Symlink in review path: ${dir}`);
+    }
     try {
       const stat = fs.lstatSync(name);
       if (!stat.isFile()) {
@@ -313,17 +367,32 @@ export class FileCommentStore {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         throw error;
       }
-      flags |= fs.constants.O_CREAT | fs.constants.O_EXCL;
     }
-    const fd = fs.openSync(name, flags, 0o666);
+    // Write beside the guide and rename over it, so a failed write never leaves a truncated
+    // guide. The temp file is created exclusively and a rename replaces a symlink itself.
+    const temp = `${name}.${randomBytes(12).toString("hex")}.tmp`;
+    const fd = fs.openSync(temp, "wx", 0o666);
+    let failure: unknown;
     try {
-      if (!fs.fstatSync(fd).isFile()) {
-        throw new Error(`Guide is not a regular file: ${name}`);
+      try {
+        fs.writeFileSync(fd, guide);
+      } finally {
+        fs.closeSync(fd);
       }
-      fs.ftruncateSync(fd, 0);
-      fs.writeFileSync(fd, guide);
+      fs.renameSync(temp, name);
+    } catch (error) {
+      failure = error;
     } finally {
-      fs.closeSync(fd);
+      try {
+        fs.unlinkSync(temp);
+      } catch (cleanupError) {
+        if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") {
+          failure = withCause(failure, cleanupError);
+        }
+      }
+    }
+    if (failure) {
+      throw failure instanceof Error ? failure : new Error(String(failure));
     }
   }
   addThread(file: string, line: number, anchor: string, body: string): ReviewThread {
