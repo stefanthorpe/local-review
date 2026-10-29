@@ -1,13 +1,13 @@
 {
   "name": "local-review",
   "displayName": "Local Review (file-backed)",
-  "description": "Add comments to diff editor lines and copy to clipboard",
-  "version": "0.1.0",
+  "description": "Review comments on diff and editor lines, saved as files that AI agents can read, reply to and resolve",
+  "version": "0.1.1",
   "publisher": "stefanthorpe",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yumazak/local-review"
+    "url": "https://github.com/stefanthorpe/local-review"
   },
   "engines": {
     "vscode": "^1.108.0"

@@ -49,6 +49,7 @@ test("provider preserves threads, deduplicates warnings, handles colon ids and f
         return disposable();
       },
       onDidCloseTextDocument: disposable,
+      onDidChangeWorkspaceFolders: disposable,
     },
     window: {
       visibleTextEditors: [editor],
@@ -164,6 +165,7 @@ test("provider re-renders an external write even when the VS Code watcher stays 
       createFileSystemWatcher: () => silent,
       onDidChangeTextDocument: disposable,
       onDidCloseTextDocument: disposable,
+      onDidChangeWorkspaceFolders: disposable,
     },
     window: { visibleTextEditors: [editor], activeTextEditor: editor, showWarningMessage() {} },
     commands: { registerCommand: disposable },

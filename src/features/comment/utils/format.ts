@@ -76,6 +76,8 @@ export const formatOpenThreads = (
     guidePath?: string;
     files: { file: string; threads: PromptThread[] }[];
   }[],
+  // Folders left out on purpose, with why. They are named so the agent does not go looking.
+  skipped: { root: string; reason: string }[] = [],
 ): string | undefined => {
   const folders = allFolders.filter((f) => f.guidePath && isSafePath(f.guidePath));
   const fence = fenceWith(randomBytes(8).toString("hex"));
@@ -123,6 +125,12 @@ export const formatOpenThreads = (
     ...fence(waiting.lines),
     "Reply in each thread; resolve it once the change is made.",
   ];
+  const named = skipped.filter((s) => isSafePath(s.root));
+  if (named.length) {
+    out.push(
+      `Skipped, their threads are not listed: ${named.map((s) => `${quote(pathText(s.root))} (${s.reason})`).join("; ")}.`,
+    );
+  }
   if (awaiting.count) {
     out.push(`Awaiting the user (${awaiting.count}):`, ...fence(awaiting.lines));
   }

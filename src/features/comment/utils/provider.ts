@@ -1,9 +1,12 @@
 import * as vscode from "vscode";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
-import { addReviewIgnore, FileCommentStore } from "./file-store";
+import { addGitExclude, addReviewIgnore, FileCommentStore } from "./file-store";
+import { isNoRepository, ownGitDir, runGit } from "./git";
 import { repin } from "./anchor";
+import { isUnderGitHome, resolveRoot } from "./root";
 import { getEditorFileName } from "../../editor/utils/detector";
 import { formatStandardComment } from "./format";
 import type { CommentInputResult } from "./input";
@@ -12,8 +15,17 @@ export interface CommentProvider {
   startCommentAtLine(uri: vscode.Uri, line: number): Promise<void>;
   refreshForEditor(editor?: vscode.TextEditor): void;
   clearAllThreads(): void;
+  roots(): string[];
   dispose(): void;
 }
+
+const SAVE_FIRST = "Save the file first; comments are stored next to saved files.";
+const NO_EDITOR = "Open the file in an editor to comment on it.";
+const NOT_LOCAL = "Comments can only be saved for files on this machine.";
+const NOT_IN_REPO =
+  "Comments are saved in the git repository that holds the file; this file under ~/git is not in one.";
+const NOT_STORABLE =
+  "Comments are only saved for files in a git repository under ~/git, or under the open folder.";
 
 export const createCommentProvider = (
   context: vscode.ExtensionContext,
@@ -32,20 +44,36 @@ export const createCommentProvider = (
   >();
   let dirTimer: ReturnType<typeof setTimeout> | undefined;
   const stores = new Map<string, FileCommentStore>();
+  // Roots that fell back to the workspace folder because no repository holds the file; they go
+  // when that folder is closed, while repository roots stay for the session.
+  const fallbackRoots = new Set<string>();
   const storeFor = (uri: vscode.Uri) => {
-    const folder = vscode.workspace.getWorkspaceFolder(uri);
-    if (uri.scheme !== "file" || !folder || folder.uri.scheme !== "file") {
+    if (uri.scheme !== "file") {
       return undefined;
     }
-    let store = stores.get(folder.uri.fsPath);
+    const folder = vscode.workspace.getWorkspaceFolder(uri);
+    const resolved = resolveRoot(
+      uri.fsPath,
+      os.homedir(),
+      folder?.uri.scheme === "file" ? folder.uri.fsPath : undefined,
+    );
+    if (!resolved) {
+      return undefined;
+    }
+    let store = stores.get(resolved.root);
     if (!store) {
-      store = new FileCommentStore(folder.uri.fsPath, (message) => {
+      if (
+        resolved.root === folder?.uri.fsPath &&
+        !fs.existsSync(path.join(resolved.root, ".git"))
+      ) {
+        fallbackRoots.add(resolved.root);
+      }
+      store = new FileCommentStore(resolved.root, (message) => {
         void vscode.window.showWarningMessage(message);
       });
-      stores.set(folder.uri.fsPath, store);
+      stores.set(resolved.root, store);
     }
-    const relative = path.relative(folder.uri.fsPath, uri.fsPath).split(path.sep).join("/");
-    return { store, relative, folder };
+    return { store, relative: resolved.relative, root: resolved.root };
   };
   const clear = (key: string) => {
     for (const thread of threads.get(key)?.values() ?? []) {
@@ -97,7 +125,7 @@ export const createCommentProvider = (
     }
   };
   // The directory to watch for a review file: its own folder once it exists, otherwise the
-  // nearest existing ancestor up to the workspace folder root, so a first agent-made file is
+  // nearest existing ancestor up to the store root, so a first agent-made file is
   // seen even when .local-review itself does not exist yet.
   const watchTarget = (reviewFile: string, root: string) => {
     for (let dir = path.dirname(reviewFile); ; dir = path.dirname(dir)) {
@@ -138,13 +166,9 @@ export const createCommentProvider = (
       return;
     }
     let exists = true;
-    const reviewFile = path.join(
-      info.folder.uri.fsPath,
-      ".local-review",
-      `${info.relative}.review.json`,
-    );
+    const reviewFile = path.join(info.root, ".local-review", `${info.relative}.review.json`);
     const key = uri.toString();
-    const target = watchTarget(reviewFile, info.folder.uri.fsPath);
+    const target = watchTarget(reviewFile, info.root);
     if (target) {
       watchDirectory(target, key);
       // Once the document's own directory exists, its earlier ancestor watch is redundant.
@@ -243,6 +267,10 @@ export const createCommentProvider = (
       return;
     }
     if (!info || !id) {
+      // A reply was typed for a thread whose file no longer maps to a store; do not lose it.
+      if (typed !== undefined) {
+        void keepText(new Error("no store root for this file"), typed);
+      }
       return;
     }
     try {
@@ -287,6 +315,13 @@ export const createCommentProvider = (
     watcher,
     folderWatcher,
     vscode.workspace.onDidCloseTextDocument((document) => forget(document.uri.toString())),
+    vscode.workspace.onDidChangeWorkspaceFolders((event) => {
+      for (const folder of event.removed) {
+        if (fallbackRoots.delete(folder.uri.fsPath)) {
+          stores.delete(folder.uri.fsPath);
+        }
+      }
+    }),
     folderWatcher.onDidCreate(onChange),
     folderWatcher.onDidDelete(onChange),
     watcher.onDidCreate(onChange),
@@ -308,6 +343,49 @@ export const createCommentProvider = (
       }
     }),
   );
+  // Offers to keep `.local-review/` out of version control. Git decides first: already ignored
+  // asks nothing; not ignored offers the repo-private exclude file, never a tracked .gitignore;
+  // only git's "not a repository" answer for a folder with no `.git` entry falls back to a .gitignore in the folder. Any other
+  // failure (no git, a timeout, an unvouched-for git dir) is an unknown state and is not worth a
+  // prompt.
+  const offerIgnore = async (root: string) => {
+    const name = path.basename(root);
+    try {
+      let route: "exclude" | "gitignore";
+      try {
+        await runGit(root, ["check-ignore", "-q", ".local-review/"]);
+        return;
+      } catch (error) {
+        if ((error as { code?: unknown }).code === 1) {
+          route = "exclude";
+        } else if (isNoRepository(root, error)) {
+          route = "gitignore";
+        } else {
+          return;
+        }
+      }
+      const gitDir = route === "exclude" ? await ownGitDir(root).catch(() => undefined) : undefined;
+      if (route === "exclude" && !gitDir) {
+        return;
+      }
+      const answer = await vscode.window.showInformationMessage(
+        route === "exclude"
+          ? `Ignore .local-review/ in ${name}?`
+          : `Add .local-review/ to .gitignore in ${name}?`,
+        "Add",
+      );
+      if (answer !== "Add") {
+        return;
+      }
+      if (gitDir) {
+        addGitExclude(gitDir);
+      } else {
+        addReviewIgnore(root);
+      }
+    } catch (error) {
+      void vscode.window.showWarningMessage(`Failed to update the ignore rules: ${error}`);
+    }
+  };
   const startCommentAtLine = async (uri: vscode.Uri, line: number) => {
     const editor = vscode.window.activeTextEditor;
     if (uri.scheme === "git" || uri.scheme === "diff") {
@@ -318,14 +396,24 @@ export const createCommentProvider = (
     }
     const info = storeFor(uri);
     if (!info || !editor) {
-      void vscode.window.showWarningMessage("No workspace folder found");
+      void vscode.window.showWarningMessage(
+        !editor
+          ? NO_EDITOR
+          : uri.scheme === "untitled"
+            ? SAVE_FIRST
+            : uri.scheme !== "file"
+              ? NOT_LOCAL
+              : isUnderGitHome(uri.fsPath, os.homedir())
+                ? NOT_IN_REPO
+                : NOT_STORABLE,
+      );
       return;
     }
     const result = await showCommentInput();
     if (!result) {
       return;
     }
-    const dir = path.join(info.folder.uri.fsPath, ".local-review");
+    const dir = path.join(info.root, ".local-review");
     const first = !fs.existsSync(path.join(dir, "README.md"));
     try {
       info.store.addThread(info.relative, line + 1, editor.document.lineAt(line).text, result.text);
@@ -334,17 +422,7 @@ export const createCommentProvider = (
       return;
     }
     if (first) {
-      try {
-        const answer = await vscode.window.showInformationMessage(
-          "Add .local-review/ to .gitignore?",
-          "Add",
-        );
-        if (answer === "Add") {
-          addReviewIgnore(info.folder.uri.fsPath);
-        }
-      } catch (error) {
-        void vscode.window.showWarningMessage(`Failed to update .gitignore: ${error}`);
-      }
+      await offerIgnore(info.root);
     }
     refreshForEditor(editor);
     if (vscode.workspace.getConfiguration("localReview").get<boolean>("copyOnComment", false)) {
@@ -377,6 +455,7 @@ export const createCommentProvider = (
     startCommentAtLine,
     refreshForEditor,
     clearAllThreads,
+    roots: () => [...stores.keys()],
     dispose: () => {
       clearAllThreads();
       controller.dispose();
