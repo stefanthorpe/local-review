@@ -41,3 +41,46 @@ test("closing a document drops its rendered threads", async () => {
     assert.equal(created.length, 2);
   });
 });
+
+test("agent creates .local-review/sub/a.review.json when no .local-review exists", async () => {
+  await withProvider(async ({ root, editor, provider, created, store }) => {
+    provider.refreshForEditor(editor);
+    assert.equal(created.length, 0);
+    assert.equal(fs.existsSync(path.join(root, ".local-review")), false);
+    store.addThread("sub/a", 1, "line", "agent-made");
+    await until(() => created.length === 1);
+    assert.equal(created.length, 1);
+  });
+});
+
+test("a document's key leaves the ancestor watcher once its own directory is watched", async () => {
+  const original = fs.watch;
+  const opened = [];
+  fs.watch = (dir, ...args) => {
+    const watcher = original(dir, ...args);
+    const entry = { dir, closed: false };
+    const close = watcher.close.bind(watcher);
+    watcher.close = () => {
+      entry.closed = true;
+      close();
+    };
+    opened.push(entry);
+    return watcher;
+  };
+  try {
+    await withProvider(async ({ root, editor, provider }) => {
+      provider.refreshForEditor(editor);
+      assert.deepEqual(
+        opened.map((e) => e.dir),
+        [root],
+      );
+      fs.mkdirSync(path.join(root, ".local-review", "sub"), { recursive: true });
+      provider.refreshForEditor(editor);
+      assert.equal(opened.at(-1).dir, path.join(root, ".local-review", "sub"));
+      assert.equal(opened[0].closed, true);
+      assert.equal(opened.at(-1).closed, false);
+    });
+  } finally {
+    fs.watch = original;
+  }
+});

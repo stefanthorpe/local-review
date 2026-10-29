@@ -27,6 +27,7 @@ const withProvider = async (body, options = {}) => {
   const editor = { document };
   const disposable = () => ({ dispose() {} });
   const handlers = {};
+  const commands = {};
   const warnings = [];
   const clipboard = [];
   const created = [];
@@ -53,7 +54,12 @@ const withProvider = async (body, options = {}) => {
       showWarningMessage: (m) => warnings.push(m),
       showInformationMessage: async () => undefined,
     },
-    commands: { registerCommand: disposable },
+    commands: {
+      registerCommand: (name, fn) => {
+        commands[name] = fn;
+        return disposable();
+      },
+    },
     Range: function (...args) {
       this.args = args;
     },
@@ -95,16 +101,17 @@ const withProvider = async (body, options = {}) => {
       async () => (options.input ? { text: options.input } : undefined),
       async (text) => {
         clipboard.push(text);
-        return true;
+        return options.copyOk ?? true;
       },
       controller,
-      false,
+      options.registerCommands ?? false,
     );
     await body({
       root,
       editor,
       provider,
       handlers,
+      commands,
       warnings,
       clipboard,
       created,

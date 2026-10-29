@@ -97,14 +97,27 @@ export const createCommentProvider = (
     }
   };
   // The directory to watch for a review file: its own folder once it exists, otherwise the
-  // nearest existing ancestor below (or at) .local-review, so a first agent-made file is seen.
-  const watchTarget = (reviewFile: string, base: string) => {
+  // nearest existing ancestor up to the workspace folder root, so a first agent-made file is
+  // seen even when .local-review itself does not exist yet.
+  const watchTarget = (reviewFile: string, root: string) => {
     for (let dir = path.dirname(reviewFile); ; dir = path.dirname(dir)) {
       if (inodeOf(dir) !== undefined) {
         return dir;
       }
-      if (dir === base || dir === path.dirname(dir)) {
+      if (dir === root || dir === path.dirname(dir)) {
         return undefined;
+      }
+    }
+  };
+  // Drops the key from every directory watch except `keep`, closing watches nobody needs.
+  const release = (key: string, keep?: string) => {
+    for (const [dir, entry] of dirWatchers) {
+      if (dir === keep) {
+        continue;
+      }
+      entry.keys.delete(key);
+      if (!entry.keys.size) {
+        closeDirWatcher(dir);
       }
     }
   };
@@ -113,12 +126,7 @@ export const createCommentProvider = (
     snapshots.delete(key);
     clearTimeout(timers.get(key));
     timers.delete(key);
-    for (const [dir, entry] of dirWatchers) {
-      entry.keys.delete(key);
-      if (!entry.keys.size) {
-        closeDirWatcher(dir);
-      }
-    }
+    release(key);
   };
   const refreshForEditor = (editor?: vscode.TextEditor) => {
     if (!editor) {
@@ -136,10 +144,11 @@ export const createCommentProvider = (
       `${info.relative}.review.json`,
     );
     const key = uri.toString();
-    const base = path.join(info.folder.uri.fsPath, ".local-review");
-    const target = watchTarget(reviewFile, base);
+    const target = watchTarget(reviewFile, info.folder.uri.fsPath);
     if (target) {
       watchDirectory(target, key);
+      // Once the document's own directory exists, its earlier ancestor watch is redundant.
+      release(key, target);
     }
     try {
       fs.lstatSync(reviewFile);
@@ -202,9 +211,30 @@ export const createCommentProvider = (
     }
     threads.set(key, rendered);
   };
+  // A refused save must not lose what the user typed: offer it back on the clipboard and
+  // say honestly whether that worked. A long text is echoed only when the copy failed.
+  const keepText = async (error: unknown, text: string) => {
+    const copied = await copyToClipboard(text);
+    const points = Array.from(text);
+    const shown = copied
+      ? points.length > 200
+        ? `${points.slice(0, 200).join("")}…`
+        : text
+      : points.length > 2000
+        ? `${points.slice(0, 2000).join("")}…`
+        : text;
+    void vscode.window.showWarningMessage(
+      `Could not save your comment: ${error}. ${
+        copied
+          ? "Your text was copied to the clipboard"
+          : "Your text could not be copied to the clipboard, so it is repeated here"
+      }: ${shown}`,
+    );
+  };
   const operate = (
     thread: vscode.CommentThread,
     fn: (store: FileCommentStore, file: string, id: string) => void,
+    typed?: string,
   ) => {
     const uri = thread.uri;
     const info = storeFor(uri);
@@ -223,7 +253,11 @@ export const createCommentProvider = (
         }
       }
     } catch (error) {
-      void vscode.window.showWarningMessage(String(error));
+      if (typed === undefined) {
+        void vscode.window.showWarningMessage(String(error));
+      } else {
+        void keepText(error, typed);
+      }
     }
   };
   if (registerCommands) {
@@ -238,7 +272,7 @@ export const createCommentProvider = (
         operate(thread, (s, f, id) => s.reopen(f, id)),
       ),
       vscode.commands.registerCommand("localReview.reply", (reply: vscode.CommentReply) =>
-        operate(reply.thread, (s, f, id) => s.reply(f, id, "user", reply.text)),
+        operate(reply.thread, (s, f, id) => s.reply(f, id, "user", reply.text), reply.text),
       ),
     );
   }
@@ -253,6 +287,7 @@ export const createCommentProvider = (
     watcher,
     folderWatcher,
     vscode.workspace.onDidCloseTextDocument((document) => forget(document.uri.toString())),
+    folderWatcher.onDidCreate(onChange),
     folderWatcher.onDidDelete(onChange),
     watcher.onDidCreate(onChange),
     watcher.onDidChange(onChange),
@@ -295,11 +330,7 @@ export const createCommentProvider = (
     try {
       info.store.addThread(info.relative, line + 1, editor.document.lineAt(line).text, result.text);
     } catch (error) {
-      // Keep what the user typed: the save was refused, so offer it back twice.
-      await copyToClipboard(result.text);
-      void vscode.window.showWarningMessage(
-        `Could not save your comment: ${error}. Your text was copied to the clipboard: ${result.text}`,
-      );
+      await keepText(error, result.text);
       return;
     }
     if (first) {
