@@ -52,9 +52,15 @@ src/utils/parser.ts:15 this logic seems duplicated
 
 ## File format and agent workflow
 
-Threads are stored in `.local-review/<source path>.review.json` at the root of the git repository or worktree the file is in, found by walking up from the file to the nearest `.git` (only for files under `~/git`, so the open folder can be a repo, a parent or a subfolder). Files elsewhere use the open workspace folder, and files in neither are not saved. Each file has a root-relative POSIX `file` path and `version: 1`. A thread has a unique `id`, a 1-based `line`, the trimmed line text as `anchor`, an `open` or `resolved` status, and a `comments` array. Each comment has an `id`, `author`, Markdown `body`, and ISO UTC `at` timestamp. Unknown fields are preserved.
+Each file's threads live in `.local-review/<source path>.review.json` at the root of the git repo or worktree that holds the file. Under `~/git`, that root is found by walking up to the nearest `.git`, so it works whatever folder you opened. Other files use the open folder. Files in neither cannot take comments.
 
-The extension writes a versioned `.local-review/README.md` guide and offers to add the directory to `.gitignore` on first use. Add comments, use Copy All, then paste the prompt once to your agent. It reads the guide and review files, replies in each thread, and may resolve its own fixes. External edits appear in the editor. Deleting the last thread removes its review file.
+Each review file has a root-relative POSIX `file` path and `version: 1`. A thread has a unique `id`, a 1-based `line`, the trimmed line text as `anchor`, an `open` or `resolved` status, and a `comments` array. Each comment has an `id`, `author`, Markdown `body`, and ISO UTC `at` timestamp. Unknown fields are preserved.
+
+The extension writes a versioned `.local-review/README.md` guide. In a repo, if git does not already ignore `.local-review/`, it offers to add it to the repo's private `.git/info/exclude`. That file is never committed. A folder outside any repo gets an offer to add it to `.gitignore`. Tip: add `.local-review/` to your global git ignore and the prompt never appears.
+
+Copy All collects threads from these places: the open folders, repos under `~/git`, repos under the open folders, and roots used this session. It skips a folder where git tracks `.local-review/` or where git cannot be asked, because those files may not be yours. The prompt names each skipped folder.
+
+Add comments, use Copy All, then paste the prompt once to your agent. It reads the guide and review files, replies in each thread, and may resolve its own fixes. External edits appear in the editor. Deleting the last thread removes its review file.
 
 Threads follow matching anchor text within 50 lines; if no match is found they are marked outdated. Renaming a source file does not move its review file. Malformed or unsupported review files are skipped with a warning and are not overwritten.
 
@@ -100,6 +106,8 @@ Threads follow matching anchor text within 50 lines; if no match is found they a
 ## Requirements
 
 - Visual Studio Code 1.108.0 or higher
+- Linux or macOS. This fork does not support Windows.
+- `git` on your PATH
 
 ## Development
 

@@ -1,5 +1,5 @@
 ---
-version: 6
+version: 7
 ---
 
 # File-Backed Review Comments - Architecture Design
@@ -103,7 +103,7 @@ new status. Both sides read and write the same file and nothing else.
 | Agent writes invalid JSON | Medium | Thread disappears from editor | Skip the file, warn with file name and parse error, never overwrite it |
 | Extension's own write triggers its watcher | High | Double render, flicker | Compare rendered snapshots and skip unchanged watcher events |
 | A thread body or a cloned repo's files carry prompt-injection text | Medium | Agent follows instructions it should not | Ids must match a strict pattern and a bad id refuses the whole file; Copy All installs the canonical guide first; excerpts sit in a marked untrusted-content fence. **Residual risk:** the fence is advice to a model, not enforcement, so a body can still sway an agent that reads it; only open threads the user last spoke in are sent, but the user cannot vet text an agent or collaborator wrote into the file |
-| A review file claims to be the user's but is not (the `author` field is unverified, and review files can arrive in a clone or a pull) | Medium | Agent acts on a stranger's request | The prompt frames items as code-review requests that cannot override the guide and tells the agent never to run commands, install packages or fetch URLs from them without asking the user. Copy All warns when git tracks any `.local-review/*.review.json` in a folder, since those threads came from a commit. **Residual risk:** `author` is a plain string anyone can write, an untracked file placed by another process looks identical to the user's, and the framing is advice to a model |
+| A review file claims to be the user's but is not (the `author` field is unverified, and review files can arrive in a clone or a pull) | Medium | Agent acts on a stranger's request | The prompt frames items as code-review requests that cannot override the guide and tells the agent never to run commands, install packages or fetch URLs from them without asking the user. Copy All skips a folder where git tracks anything under `.local-review/`, or where git cannot be asked, since those files may have come from a commit; the prompt names the skipped folder. **Residual risk:** `author` is a plain string anyone can write, an untracked file placed by another process looks identical to the user's, and the framing is advice to a model |
 | A review path carries shell syntax or line breaks | Medium | Quoted prompt line broken or a command smuggled into an agent's shell | Paths containing control, line/paragraph-separator or format characters, backtick, `$`, `;`, `&`, `|`, `<`, `>`, `"` or `\` are refused when a thread is added (the typed text is kept) and skipped with a named warning when found on disk; every path in the prompt is single-quoted; folder roots and guide paths pass the same check. **Residual risk:** a path may still hold `[ ] ( ) # ' @ + ,` and spaces, so the quoting, not the filter alone, protects a shell, and a model can still misread an odd path |
 | Directory watch goes quiet after `.local-review/` is deleted and recreated | Medium | Agent replies stop rendering | The direct watcher closes and re-arms when its directory is gone or its inode changed |
 | Source file renamed | Low | Review file orphaned | Out of scope for v1; orphan is visible on disk and can be moved by hand |
@@ -204,28 +204,45 @@ start with `..` means no root. Stores are keyed by root. The fallback `fs.watch`
 roots outside the workspace, since the extension's `FileSystemWatcher` sees only
 workspace folders.
 
-**Copy All finds roots from four sources**, deduplicated by real path, so it still works
-after a reload when no store has been opened yet:
+**Copy All finds roots from three sources**, deduplicated by real path, so it still works
+after a reload when no store has been opened yet. Nothing is kept between sessions.
 
-1. The file-scheme workspace folders.
-2. Discovery: every `.local-review` directory at most 5 levels below a workspace folder
-   (the bound the agents' `find -maxdepth` uses), skipping `node_modules`, `.git` and
-   `.venv` and not following symlinked directories. Only a folder holding a `.git` entry
-   (directory or file), or the workspace folder itself, counts.
-3. Persisted roots: each root a comment was written under (add, reply, resolve, reopen,
-   delete; viewing does not count) is kept in the extension's global state under one key.
-   Entries whose `.local-review` directory no longer exists are dropped and removed from
-   the state when Copy All reads it.
-4. Roots whose store the provider opened this session.
+1. Discovery under `~/git` (its real path, so a symlinked `~/git` works). This is what the
+   agents' own `find ~/git -maxdepth 5` sees, so Copy All and the agents agree.
+2. Discovery under each file-scheme workspace folder, and the workspace folders themselves.
+3. Roots whose store the provider opened this session.
 
-**No migration.** Threads written under the old rule at a workspace root, for files that
-belong to a nested repository, are not moved. The editor no longer shows them, because it
-now looks in the nested repository's own `.local-review`; Copy All still lists them while
-the workspace folder is open.
+Discovery (`discoverReviewRoots` in `utils/discover.ts`) finds a `.local-review` directory
+at most 5 levels below the start folder. The start folder's own `.local-review` is level 1.
+A folder counts only if it holds a `.git` entry (directory or file), or is the start
+folder. It skips `node_modules`, `.git`, `.venv`, `dist`, `out`, `build`, `.vite`,
+`coverage`, `.next`, `.vscode-test` and `test-results`, and never follows symlinked
+directories. It reads sibling folders in parallel. After 20000 folders it stops, keeps
+what it found, and Copy All reports "stopped searching <folder> after N folders".
 
-Every git command the extension runs uses `-c core.fsmonitor=false`, because a resolved
-root can be any `.git` under `~/git` and git runs repo-local config during read-only
-commands.
+Copy All asks git whether `.local-review/` is tracked before it writes anything in a root.
+The answer is tracked, untracked or unknown. Unknown covers a missing git, a timeout, and
+any refusal other than "not a git repository" (dubious ownership, for example). A tracked
+or unknown root is skipped: nothing is written there (not even the guide), its threads
+stay out of the prompt, and the prompt names the folder and the reason. The toast lists
+every problem, so one cannot hide another. A root whose path is unsafe to quote in a
+prompt is skipped and named too.
+
+**No migration.** Old threads are not moved. Two cases matter.
+
+- A workspace opened at a subfolder of a `~/git` repo used to store at the subfolder.
+  Those old subfolder `.local-review` threads no longer render in the editor, because
+  the store is now the repo root. Copy All still lists them while that folder is open.
+- A symlink from outside `~/git` into it stores under the `~/git` repo, since the
+  real path decides. Threads written there under the old rule are not moved either.
+
+Git calls use an argv array, `-c core.fsmonitor=false` and `LC_ALL=C`, with the caller's
+`GIT_*` variables dropped. On Windows `runGit` refuses without starting git, because a bare
+`git` there looks in the untrusted working directory first. The fork supports Linux and
+macOS only.
+
+Every git command disables `core.fsmonitor`, because a resolved root can be any `.git`
+under `~/git` and git runs repo-local config during read-only commands.
 
 ## Behaviour Changes
 
@@ -246,10 +263,15 @@ commands.
   Thread excerpts are fenced as untrusted review text. Errors from several files
   collapse into one summary warning, led by any guide failure; when nothing is copied
   because folders were skipped, the message says how many.
-- **First use** in a root checks `git check-ignore`; when `.local-review/` is already
-  ignored nothing is asked. Otherwise it offers, naming the root, to add the line to the
-  repository's private `info/exclude` (the common git dir, so a worktree shares it), never
-  to a tracked `.gitignore`. A folder with no repository keeps the `.gitignore` offer.
+- **First use** in a root runs `git check-ignore` first. Exit 0 (already ignored) asks
+  nothing. Exit 1 offers, naming the root, to add the line to the repository's private
+  `info/exclude` (the common git dir, so a worktree shares it), never to a tracked
+  `.gitignore`. Only git's "not a git repository" answer falls back to a `.gitignore`
+  offer for the folder. Any other failure asks nothing. Before offering the exclude, the
+  common git dir is checked: it must be the folder's own `.git` directory, or the common
+  dir of a repo whose `git worktree list` really lists this folder. A cloned repo's `.git`
+  file that points somewhere else is skipped silently. A workspace folder inside a repo
+  (no `.git` of its own) is checked against the repo's top level.
 
 ## Error Handling
 
@@ -267,8 +289,10 @@ commands.
   attached as its `cause`. The guide is replaced the same way, without the directory sync.
 - **Left side of a diff** (`git:` / `diff:` URIs): the warning says the side is
   read-only and not file-backed.
-- **No root:** commands warn and do nothing. The text depends on the cause: no saved file
-  ("Save the file first; comments are stored next to saved files."), a `~/git` file in no
+- **No root:** commands warn and do nothing. The text depends on the cause: an untitled
+  document ("Save the file first; comments are stored next to saved files."), no active
+  editor ("Open the file in an editor to comment on it."), another scheme such as a
+  remote file ("Comments can only be saved for files on this machine."), a `~/git` file in no
   repository and outside the workspace ("Comments are saved in the git repository that
   holds the file; this file under ~/git is not in one."), or otherwise "Comments are only
   saved for files in a git repository under ~/git, or under the open folder."
@@ -286,6 +310,21 @@ TDD per the RS universal rules.
   file updates the rendered thread; a self-write does not double-render.
 
 ## Changelog
+
+### v7 — 2026-10-29
+
+- Copy All no longer keeps roots in global state, which leaked between windows. It
+  discovers repos under `~/git` and under the open folders, plus roots used this session.
+- Discovery is bounded to 5 levels below its start folder, prunes more build folders,
+  reads siblings in parallel, and stops after 20000 folders with a named problem.
+- Tracked or unverifiable folders are skipped before anything is written, named in the
+  prompt, and no longer hide behind another problem in the toast.
+- Git calls refuse on Windows. The ignore offer asks git first, validates the common git
+  dir before writing `info/exclude`, and uses the `.gitignore` route only for "not a
+  repository".
+- A lost reply is kept; unsafe root paths are reported; no-root messages are split further.
+- No-migration note now covers a workspace at a subfolder of a `~/git` repo and symlinks
+  into `~/git`.
 
 ### v6 — 2026-10-29
 
