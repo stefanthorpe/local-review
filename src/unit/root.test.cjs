@@ -178,3 +178,31 @@ test("a file outside its workspace folder never yields a relative path starting 
     assert.equal(resolveRoot(file, home, path.join(base, "a", "x.ts")), undefined);
   });
 });
+
+test("a ~/git that is itself a symlink resolves, via either path", () => {
+  fixture(({ base, home, git }) => {
+    fs.rmSync(git, { recursive: true });
+    const realGit = path.join(base, "disk", "gitdir");
+    fs.mkdirSync(path.join(realGit, "repo", ".git"), { recursive: true });
+    touch(path.join(realGit, "repo", "a.ts"));
+    fs.symlinkSync(realGit, git);
+    const expected = { root: path.join(realGit, "repo"), relative: "a.ts" };
+    assert.deepEqual(resolveRoot(path.join(git, "repo", "a.ts"), home, undefined), expected);
+    assert.deepEqual(resolveRoot(path.join(realGit, "repo", "a.ts"), home, undefined), expected);
+  });
+});
+
+test("a .git planted under node_modules is never a root; the walk continues to the real repo", () => {
+  fixture(({ home, git }) => {
+    fs.mkdirSync(path.join(git, "repo", ".git"), { recursive: true });
+    fs.mkdirSync(path.join(git, "repo", "node_modules", "pkg", ".git"), { recursive: true });
+    const file = touch(path.join(git, "repo", "node_modules", "pkg", "a.ts"));
+    assert.deepEqual(resolveRoot(file, home, undefined), {
+      root: path.join(git, "repo"),
+      relative: "node_modules/pkg/a.ts",
+    });
+    fs.mkdirSync(path.join(git, "loose", "node_modules", "pkg", ".git"), { recursive: true });
+    const other = touch(path.join(git, "loose", "node_modules", "pkg", "b.ts"));
+    assert.equal(resolveRoot(other, home, undefined), undefined);
+  });
+});
