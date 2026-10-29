@@ -15,7 +15,7 @@ When reviewing code with AI Agents, you often need to:
 2. Collect multiple comments across different files
 3. Share all feedback in a structured format
 
-Local Review streamlines this workflow by letting you add comments directly in VS Code and share persistent review threads with AI agents through files in the workspace.
+Local Review streamlines this workflow by letting you add comments directly in VS Code and share persistent review threads with AI agents through files in the repository.
 
 ## Features
 
@@ -52,7 +52,7 @@ src/utils/parser.ts:15 this logic seems duplicated
 
 ## File format and agent workflow
 
-Each workspace stores threads in `.local-review/<source path>.review.json`, with a workspace-relative POSIX `file` path and `version: 1`. A thread has a unique `id`, a 1-based `line`, the trimmed line text as `anchor`, an `open` or `resolved` status, and a `comments` array. Each comment has an `id`, `author`, Markdown `body`, and ISO UTC `at` timestamp. Unknown fields are preserved.
+Threads are stored in `.local-review/<source path>.review.json` at the root of the git repository or worktree the file is in, found by walking up from the file to the nearest `.git` (only for files under `~/git`, so the open folder can be a repo, a parent or a subfolder). Files elsewhere use the open workspace folder, and files in neither are not saved. Each file has a root-relative POSIX `file` path and `version: 1`. A thread has a unique `id`, a 1-based `line`, the trimmed line text as `anchor`, an `open` or `resolved` status, and a `comments` array. Each comment has an `id`, `author`, Markdown `body`, and ISO UTC `at` timestamp. Unknown fields are preserved.
 
 The extension writes a versioned `.local-review/README.md` guide and offers to add the directory to `.gitignore` on first use. Add comments, use Copy All, then paste the prompt once to your agent. It reads the guide and review files, replies in each thread, and may resolve its own fixes. External edits appear in the editor. Deleting the last thread removes its review file.
 

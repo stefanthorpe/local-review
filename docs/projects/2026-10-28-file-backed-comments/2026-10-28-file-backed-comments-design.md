@@ -1,5 +1,5 @@
 ---
-version: 4
+version: 5
 ---
 
 # File-Backed Review Comments - Architecture Design
@@ -59,7 +59,8 @@ new status. Both sides read and write the same file and nothing else.
 
 ### 2. One mirrored folder, not sibling files
 
-- **Chosen:** `.local-review/<relpath>.review.json` at the workspace root.
+- **Chosen:** `.local-review/<relpath>.review.json` at the store root (see Root resolution
+  below; usually the git repository or worktree the file is in).
 - **Rejected:** `foo.ts.review.json` next to each source file. It scatters files
   through the tree and needs a gitignore glob.
 - **Rejected:** one `.local-review.json` for the workspace. Simple, but you and
@@ -129,7 +130,8 @@ GitHub PR reviews, a CLI, and handling source renames.
 
 ## File Schema
 
-Path: `<workspaceRoot>/.local-review/<path relative to root>.review.json`.
+Path: `<root>/.local-review/<path relative to root>.review.json`, where `<root>` is the
+store root from Root resolution below.
 
 ```json
 {
@@ -173,8 +175,33 @@ so an agent's annotations survive.
 | `FileCommentStore` | Load/save review files; `addThread`, `reply`, `resolve`, `reopen`, `deleteThread`, `listForFile`, `listAll`; atomic writes (temp + rename + directory fsync) |
 | `anchor` util | Pure function: given thread line + anchor + document lines, return re-pinned line and `outdated` flag |
 | `CommentProvider` (extended) | One VS Code comment per thread comment; native resolved state (collapsed); Reply / Resolve / Reopen / Delete actions via `comments/commentThread/*` menus |
-| Review watcher | Two layers. A `FileSystemWatcher` on `.local-review/**/*.review.json`, plus a direct non-recursive `fs.watch` fallback on the directory that holds each open document's review file, or on the nearest existing ancestor (up to the workspace folder root when `.local-review` itself is missing, with the folder watcher's create event also subscribed) before the file exists, because the recursive watcher can miss a subtree created moments earlier. On Linux `fs.watch` on a deleted directory emits `rename`, not `error`, so an entry whose directory is gone or whose inode changed is closed and re-armed. Per-document entries are dropped when the document closes, and a document's key leaves an ancestor watch once its own directory is watched. Events compare snapshot hashes and update changed threads in place |
+| Review watcher | Two layers. A `FileSystemWatcher` on `.local-review/**/*.review.json`, plus a direct non-recursive `fs.watch` fallback on the directory that holds each open document's review file, or on the nearest existing ancestor (up to the store root when `.local-review` itself is missing, with the folder watcher's create event also subscribed) before the file exists, because the recursive watcher can miss a subtree created moments earlier. On Linux `fs.watch` on a deleted directory emits `rename`, not `error`, so an entry whose directory is gone or whose inode changed is closed and re-armed. Per-document entries are dropped when the document closes, and a document's key leaves an ancestor watch once its own directory is watched. Events compare snapshot hashes and update changed threads in place |
 | Agent README | `.local-review/README.md` versioned and rewritten on review writes: schema plus the three operations (append reply, set `status`, remove thread) |
+
+## Root resolution
+
+The agent instructions only trust a `.local-review` at a git repository or worktree top
+level, and the folder VS Code has open varies (a repo, a parent such as `~/git/RS`, or a
+subfolder). So the store root is derived from the file, not from the open folder
+(`resolveRoot` in `utils/root.ts`, a pure function of the file path, the home directory
+and the containing workspace folder):
+
+1. If the file's real path (symlinks resolved) is under the real `<home>/git/` (a
+   path-segment prefix, so `~/gitfoo` is not), walk up from its directory to the nearest
+   ancestor that has a `.git` entry, a directory or a file (worktrees and clones with a
+   `.git` file count), stopping at `<home>/git` itself, which is a root only if it has
+   `.git`. Nearest wins, so a child clone or worktree inside a parent repo gets its own
+   root.
+2. If that finds no repository, or the file is not under `~/git`, the root is the
+   workspace folder containing the file, as before.
+3. Otherwise there is no root and the comment is refused.
+
+The relative path is the file relative to the root with `/` separators; a path that would
+start with `..` means no root. Stores are keyed by root. Copy All collects from the
+union of the file-scheme workspace folders and every root the provider created a store
+for this session, deduplicated by real path. The fallback `fs.watch` covers roots
+outside the workspace, since the extension's `FileSystemWatcher` sees only workspace
+folders.
 
 ## Behaviour Changes
 
@@ -195,7 +222,7 @@ so an agent's annotations survive.
   Thread excerpts are fenced as untrusted review text. Errors from several files
   collapse into one summary warning, led by any guide failure; when nothing is copied
   because folders were skipped, the message says how many.
-- **First use** in a workspace offers to add `.local-review/` to `.gitignore`.
+- **First use** in a root offers to add `.local-review/` to `.gitignore`.
 
 ## Error Handling
 
@@ -213,7 +240,7 @@ so an agent's annotations survive.
   attached as its `cause`. The guide is replaced the same way, without the directory sync.
 - **Left side of a diff** (`git:` / `diff:` URIs): the warning says the side is
   read-only and not file-backed.
-- **No workspace folder:** commands warn and do nothing, as upstream does for no editor.
+- **No root:** commands warn "Comments are only saved for files under ~/git or the open folder." and do nothing.
 
 ## Testing
 
@@ -228,6 +255,13 @@ TDD per the RS universal rules.
   file updates the rendered thread; a self-write does not double-render.
 
 ## Changelog
+
+### v5 — 2026-10-29
+
+- Store root is resolved per file (nearest `.git` ancestor under `~/git`, else the
+  workspace folder) instead of always the workspace folder; see Root resolution.
+- Copy All also collects from every root the provider stored comments in this session.
+- No-root error text changed.
 
 ### v4 — 2026-10-28
 
