@@ -290,3 +290,91 @@ test("the gutter plus covers a file in a ~/git repository", async () => {
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("the cursor on the last line still opens a box", async () => {
+  await withProvider(async ({ editor, provider, created, executed, type, store }) => {
+    editor.document.lineCount = 5;
+    editor.document.lineAt = (i) => ({ text: `text ${i}` });
+    editor.selection.active.line = 4;
+    await provider.startComment(editor.document.uri);
+    assert.deepEqual(executed, [ADD]);
+    assert.equal(boxes(created).length, 1);
+    assert.equal(created[0].range.start.line, 4);
+    await type("last line");
+    assert.equal(store.listForFile("sub/a")[0].line, 5);
+  });
+});
+
+test("a line the range provider does not cover opens no box", async () => {
+  await withProvider(async ({ editor, provider, created, executed }) => {
+    editor.document.lineCount = 5;
+    editor.selection.active.line = 5;
+    await provider.startComment(editor.document.uri);
+    assert.deepEqual(executed, [ADD]);
+    assert.equal(created.length, 0);
+  });
+});
+
+test("a template box is submitted through localReview.add, so dropping that registration fails here", async () => {
+  await withProvider(async ({ editor, provider, commands, created, store }) => {
+    await provider.startComment(editor.document.uri);
+    assert.equal(typeof commands["localReview.add"], "function");
+    await commands["localReview.add"]({ thread: created[0], text: "x" });
+    assert.equal(store.listForFile("sub/a").length, 1);
+  });
+});
+
+test("the box asks for the comment with a placeholder that names the save shortcut", async () => {
+  await withProvider(async ({ controller }) => {
+    assert.equal(controller.options.placeHolder, "Comment for the agent (Ctrl+Enter to save)");
+  });
+});
+
+test("the shortcut on a line that already has a thread expands and focuses it instead of toggling", async () => {
+  await withProvider(async ({ editor, provider, created, executed, type }) => {
+    editor.document.lineCount = 5;
+    editor.selection.active.line = 3;
+    await provider.startComment(editor.document.uri);
+    await type("first");
+    const thread = stored(created)[0];
+    thread.collapsibleState = 0;
+    executed.length = 0;
+    await provider.startComment(editor.document.uri);
+    assert.deepEqual(executed, ["workbench.action.focusCommentOnCurrentLine"]);
+    assert.equal(thread.collapsibleState, 1);
+    assert.equal(boxes(created).length, 0);
+    assert.equal(stored(created).length, 1);
+  });
+});
+
+test("a thread on another line leaves the shortcut opening a new box", async () => {
+  await withProvider(async ({ editor, provider, created, executed, type }) => {
+    editor.document.lineCount = 5;
+    editor.selection.active.line = 3;
+    await provider.startComment(editor.document.uri);
+    await type("first");
+    editor.selection.active.line = 1;
+    executed.length = 0;
+    await provider.startComment(editor.document.uri);
+    assert.deepEqual(executed, [ADD]);
+    assert.equal(boxes(created).length, 1);
+  });
+});
+
+test("hiding a box stores nothing, and the shortcut then opens a new empty box that takes its own text", async () => {
+  await withProvider(async ({ editor, provider, created, type, store }) => {
+    await provider.startComment(editor.document.uri);
+    const first = created[0];
+    // Hiding the box (Escape) disposes the template thread without any submit.
+    first.dispose();
+    assert.equal(store.listForFile("sub/a").length, 0);
+    await provider.startComment(editor.document.uri);
+    const second = boxes(created)[0];
+    assert.notEqual(second, first);
+    assert.equal(second.comments.length, 0);
+    await type("only this");
+    const threads = store.listForFile("sub/a");
+    assert.equal(threads.length, 1);
+    assert.equal(threads[0].comments[0].body, "only this");
+  });
+});

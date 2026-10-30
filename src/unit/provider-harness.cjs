@@ -38,7 +38,20 @@ const withProvider = async (body, options = {}) => {
   const editor = { document, selection: { active: { line: 0 } } };
   const folderLookups = [];
   const executed = [];
-  const disposable = () => ({ dispose() {} });
+  // Every disposable the provider is handed or returns, so a test can see what dispose released.
+  const disposables = [];
+  const disposable = () => {
+    const d = {
+      disposed: 0,
+      dispose() {
+        this.disposed++;
+      },
+    };
+    disposables.push(d);
+    return d;
+  };
+  // The callbacks the provider registered on the (otherwise silent) file watchers.
+  const watched = [];
   const handlers = {};
   const commands = {};
   const warnings = [];
@@ -48,11 +61,15 @@ const withProvider = async (body, options = {}) => {
   const workspaceFolders = options.noWorkspace
     ? []
     : [{ name: path.basename(root), uri: { scheme: "file", fsPath: root } }];
-  const silent = {
-    onDidCreate: disposable,
-    onDidChange: disposable,
-    onDidDelete: disposable,
-    dispose() {},
+  const silent = () => {
+    const watcher = disposable();
+    for (const event of ["onDidCreate", "onDidChange", "onDidDelete"]) {
+      watcher[event] = (fn) => {
+        watched.push(fn);
+        return disposable();
+      };
+    }
+    return watcher;
   };
   const vscode = {
     workspace: {
@@ -64,7 +81,7 @@ const withProvider = async (body, options = {}) => {
         return options.noWorkspace ? undefined : { uri: { scheme: "file", fsPath: root } };
       },
       asRelativePath: (u) => path.relative(root, u.fsPath),
-      createFileSystemWatcher: () => silent,
+      createFileSystemWatcher: () => silent(),
       onDidChangeTextDocument: disposable,
       onDidChangeWorkspaceFolders: (f) => {
         handlers.folders = f;
@@ -95,12 +112,17 @@ const withProvider = async (body, options = {}) => {
         commands[name] = fn;
         return disposable();
       },
-      // Stands in for VS Code's own handler of the add-comment command: it asks the controller
-      // for an empty template thread (no context value) on the cursor line, as the gutter plus does.
+      // Stands in for VS Code's own handler of the add-comment command: it asks the controller's
+      // commenting range provider whether the cursor line can take a comment, and only then makes
+      // an empty template thread (no context value) there, as the gutter plus does.
       executeCommand: async (name) => {
         executed.push(name);
         if (name === "workbench.action.addComment" && !options.addCommentNoop) {
           const line = editor.selection.active.line;
+          const ranges = controller.commentingRangeProvider?.provideCommentingRanges(document);
+          if (!ranges?.some((r) => r.start.line <= line && line <= r.end.line)) {
+            return;
+          }
           const thread = controller.createCommentThread(
             uri,
             new vscode.Range(line, 0, line, 0),
@@ -151,8 +173,9 @@ const withProvider = async (body, options = {}) => {
     delete require.cache[require.resolve(OUT + "provider")];
     const { createCommentProvider } = require(OUT + "provider");
     const { FileCommentStore } = require(OUT + "file-store");
+    const subscriptions = [];
     provider = createCommentProvider(
-      { subscriptions: [] },
+      { subscriptions },
       async (text) => {
         clipboard.push(text);
         return options.copyOk ?? true;
@@ -160,14 +183,18 @@ const withProvider = async (body, options = {}) => {
       controller,
       options.registerCommands ?? true,
     );
-    // Types `text` into the newest live template box (an empty thread with no context value), as
-    // the user would, and submits it.
-    const type = async (text) => {
-      const box = created
-        .filter((t) => !t.disposed && t.contextValue === undefined && t.comments.length === 0)
-        .at(-1);
+    // Types `text` into a comment box and submits it, as the user would. The newest live template
+    // box (an empty thread with no context value) submits through localReview.add; a stored thread
+    // passed as `into` takes a reply through localReview.reply, the way the menu wires them.
+    const type = async (text, into) => {
+      const box =
+        into ??
+        created
+          .filter((t) => !t.disposed && t.contextValue === undefined && t.comments.length === 0)
+          .at(-1);
       assert.ok(box, "no comment box is open");
-      await commands["localReview.reply"]({ thread: box, text });
+      const command = box.contextValue === undefined ? "localReview.add" : "localReview.reply";
+      await commands[command]({ thread: box, text });
     };
     if (options.input !== undefined) {
       // `input` simulates the user typing that text into the inline box each time one opens.
@@ -188,6 +215,9 @@ const withProvider = async (body, options = {}) => {
       commands,
       controller,
       type,
+      disposables,
+      watched,
+      subscriptions,
       executed,
       folderLookups,
       warnings,

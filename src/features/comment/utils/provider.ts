@@ -55,19 +55,28 @@ export const createCommentProvider = (
     );
     return found && { ...found, folder };
   };
-  // Where a document's comments live, resolved once per open document: the gutter asks on every
-  // render, and the answer needs a walk up the file system. Dropped when the document closes or
-  // the workspace folders change.
-  const resolved = new Map<string, ReturnType<typeof resolveUncached>>();
-  const resolveFor = (uri: vscode.Uri) => {
+  // Where a document's comments live. Every explicit path (the shortcut's guard, a submit, a
+  // reply, a render) resolves afresh, so a repository created after the document opened is seen.
+  const resolveFor = (uri: vscode.Uri) =>
+    uri.scheme === "file" ? resolveUncached(uri) : undefined;
+  // Only the gutter, which asks on every render, reads this cache: it needs a walk up the file
+  // system each time. Only an answer is cached, never "no root", so a repository created later is
+  // offered at once. Dropped when the document closes, the workspace folders change or a `.git`
+  // appears or goes.
+  const rootCache = new Map<string, ReturnType<typeof resolveUncached>>();
+  const cachedRootFor = (uri: vscode.Uri) => {
     if (uri.scheme !== "file") {
       return undefined;
     }
     const key = uri.toString();
-    if (!resolved.has(key)) {
-      resolved.set(key, resolveUncached(uri));
+    let found = rootCache.get(key);
+    if (!found) {
+      found = resolveUncached(uri);
+      if (found) {
+        rootCache.set(key, found);
+      }
     }
-    return resolved.get(key);
+    return found;
   };
   const storeFor = (uri: vscode.Uri) => {
     const resolved = resolveFor(uri);
@@ -165,15 +174,24 @@ export const createCommentProvider = (
     }
   };
   const forget = (key: string) => {
-    resolved.delete(key);
+    rootCache.delete(key);
     clear(key);
     snapshots.delete(key);
     clearTimeout(timers.get(key));
     timers.delete(key);
     release(key);
   };
+  // Everything the provider registered with VS Code (also handed to the extension context, which
+  // disposes it a second time at shutdown). A provider built on a stand-in context, as the tests
+  // do, must still release its watchers and listeners itself.
+  const own: vscode.Disposable[] = [];
+  let disposed = false;
+  const register = (...items: vscode.Disposable[]) => {
+    own.push(...items);
+    context.subscriptions.push(...items);
+  };
   const refreshForEditor = (editor?: vscode.TextEditor) => {
-    if (!editor) {
+    if (!editor || disposed) {
       return;
     }
     const uri = editor.document.uri;
@@ -305,7 +323,7 @@ export const createCommentProvider = (
     }
   };
   if (registerCommands) {
-    context.subscriptions.push(
+    register(
       vscode.commands.registerCommand("localReview.deleteComment", (thread: vscode.CommentThread) =>
         operate(thread, (s, f, id) => s.deleteThread(f, id)),
       ),
@@ -323,26 +341,31 @@ export const createCommentProvider = (
       ),
     );
   }
+  controller.options = { placeHolder: "Comment for the agent (Ctrl+Enter to save)" };
   controller.commentingRangeProvider = {
     // The gutter "+" is offered for every line of a document whose comments can be stored.
     provideCommentingRanges: (document) =>
-      resolveFor(document.uri)
+      cachedRootFor(document.uri)
         ? [new vscode.Range(0, 0, Math.max(0, document.lineCount - 1), 0)]
         : undefined,
   };
   const watcher = vscode.workspace.createFileSystemWatcher("**/.local-review/**/*.review.json");
   const folderWatcher = vscode.workspace.createFileSystemWatcher("**/.local-review");
+  const gitWatcher = vscode.workspace.createFileSystemWatcher("**/.git");
   function onChange() {
     for (const editor of vscode.window.visibleTextEditors) {
       refreshForEditor(editor);
     }
   }
-  context.subscriptions.push(
+  register(
     watcher,
     folderWatcher,
+    gitWatcher,
+    gitWatcher.onDidCreate(() => rootCache.clear()),
+    gitWatcher.onDidDelete(() => rootCache.clear()),
     vscode.workspace.onDidCloseTextDocument((document) => forget(document.uri.toString())),
     vscode.workspace.onDidChangeWorkspaceFolders((event) => {
-      resolved.clear();
+      rootCache.clear();
       for (const folder of event.removed) {
         if (fallbackRoots.delete(folder.uri.fsPath)) {
           stores.delete(folder.uri.fsPath);
@@ -416,6 +439,7 @@ export const createCommentProvider = (
   // Hands over to VS Code's own add-comment command, the one behind the gutter "+". It asks the
   // commenting range provider for the line, opens an empty reply box under it and puts the
   // keyboard in it. Typing and submitting there reaches localReview.add, which writes the comment.
+  // On a line that already has a stored thread it opens that thread for a reply instead.
   const startComment = async (uri: vscode.Uri) => {
     const editor = vscode.window.activeTextEditor;
     if (uri.scheme === "git" || uri.scheme === "diff") {
@@ -438,10 +462,22 @@ export const createCommentProvider = (
       );
       return;
     }
+    // VS Code's add-comment command toggles a thread that already sits on the line, which would
+    // hide one the user is looking at. Open that thread for a reply instead.
+    const line = editor.selection.active.line;
+    const existing = [...(threads.get(uri.toString())?.values() ?? [])].find(
+      (thread) => thread.range?.start.line === line,
+    );
+    if (existing) {
+      existing.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+      await vscode.commands.executeCommand("workbench.action.focusCommentOnCurrentLine");
+      return;
+    }
     await vscode.commands.executeCommand("workbench.action.addComment");
   };
-  // Template threads (the empty box VS Code opens) already stored; a repeated submit of one is
-  // ignored.
+  // Template boxes (the empty thread VS Code opens) whose comment is already stored. The box is
+  // disposed after the store, but VS Code can still deliver a second submit for it; that one is
+  // ignored. The check and the add run with no await between them, so two submits cannot both pass.
   const submitted = new WeakSet<vscode.CommentThread>();
   // A comment typed into the empty box VS Code opens (from the shortcut or the gutter "+")
   // becomes a stored thread.
@@ -502,7 +538,7 @@ export const createCommentProvider = (
     for (const key of threads.keys()) {
       clear(key);
     }
-    resolved.clear();
+    rootCache.clear();
     snapshots.clear();
     for (const timer of timers.values()) {
       clearTimeout(timer);
@@ -522,7 +558,14 @@ export const createCommentProvider = (
     clearAllThreads,
     roots: () => [...stores.keys()],
     dispose: () => {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
       clearAllThreads();
+      for (const item of own) {
+        item.dispose();
+      }
       controller.dispose();
     },
   };
