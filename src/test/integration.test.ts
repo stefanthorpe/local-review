@@ -141,8 +141,9 @@ suite("Gutter comment ranges", () => {
     const controller = {
       dispose() {},
     } as unknown as vscode.CommentController;
+    const subscriptions: vscode.Disposable[] = [];
     const provider = createCommentProvider(
-      { subscriptions: [] } as unknown as vscode.ExtensionContext,
+      { subscriptions } as unknown as vscode.ExtensionContext,
       async () => true,
       controller,
       false,
@@ -158,8 +159,15 @@ suite("Gutter comment ranges", () => {
         controller.commentingRangeProvider!.provideCommentingRanges(untitled, token),
         undefined,
       );
+      await vscode.window.showTextDocument(untitled);
+      await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
     } finally {
+      // The provider's own watchers and listeners must not outlive the test: a late event would
+      // call into this stand-in controller while a later test runs.
       provider.dispose();
+      for (const disposable of subscriptions) {
+        disposable.dispose();
+      }
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -211,11 +219,19 @@ suite("Real comment controller commands", () => {
 });
 
 suite("Real inline comment box", () => {
-  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-  const until = async (condition: () => boolean, ms = 8000) => {
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  // Polls an observable condition and fails loudly, naming what never happened.
+  const waitFor = async (
+    what: string,
+    condition: () => boolean | Promise<boolean>,
+    ms = 10000,
+  ): Promise<void> => {
     const deadline = Date.now() + ms;
-    while (!condition() && Date.now() < deadline) {
-      await pause(100);
+    while (!(await condition())) {
+      if (Date.now() > deadline) {
+        throw new Error(`timed out waiting for ${what}`);
+      }
+      await wait(50);
     }
   };
   const root = () => vscode.workspace.workspaceFolders![0].uri.fsPath;
@@ -224,12 +240,49 @@ suite("Real inline comment box", () => {
   let name = "";
   let hadGuide = false;
   let hadReviewDir = false;
+  let document: vscode.TextDocument;
+  let store: FileCommentStore;
+  const ORIGINAL = "alpha\nbravo\ncharlie\n";
+
+  // Keystrokes go to whatever has focus, and the box takes it a moment after the command that
+  // opens it. A keystroke that reaches the source editor edits the document, which is observable,
+  // so an attempt whose text edited the document is undone and retried, backing off a little more
+  // each time; the text has reached the box only when the document did not change. `reset` closes
+  // a box from a failed attempt first, because opening again over one would toggle it shut.
+  const typeIntoBox = async (
+    open: () => Thenable<unknown>,
+    text: string,
+    reset?: () => Thenable<unknown>,
+  ) => {
+    let attempt = 0;
+    await waitFor("the text to reach the comment box", async () => {
+      if (attempt > 0) {
+        await reset?.();
+      }
+      await open();
+      await wait(Math.min(100 * ++attempt, 500));
+      const version = document.version;
+      await vscode.commands.executeCommand("type", { text });
+      if (document.version === version) {
+        return true;
+      }
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(document.uri, new vscode.Range(0, 0, document.lineCount, 0), ORIGINAL);
+      await vscode.workspace.applyEdit(edit);
+      return false;
+    });
+  };
+  const hideBox = () => vscode.commands.executeCommand("workbench.action.hideComment");
+  const shortcut = () => vscode.commands.executeCommand("local-review.addComment");
+  const submitBox = () => vscode.commands.executeCommand("editor.action.submitComment");
+  const bodies = () => store.listForFile(name).flatMap((t) => t.comments.map((c) => c.body));
 
   setup(async function () {
     this.timeout(20000);
     const extension = vscode.extensions.getExtension("stefanthorpe.local-review");
     assert.ok(extension);
     await extension.activate();
+    store = new FileCommentStore(root());
     dir = fs.mkdtempSync(path.join(root(), "real-box-"));
     name = `${path.basename(dir)}/source.txt`;
     source = path.join(dir, "source.txt");
@@ -241,59 +294,110 @@ suite("Real inline comment box", () => {
     if (!hadGuide) {
       fs.writeFileSync(guide, "test guide", { flag: "wx" });
     }
-    fs.writeFileSync(source, "alpha\nbravo\ncharlie\n");
-    const document = await vscode.workspace.openTextDocument(source);
+    fs.writeFileSync(source, ORIGINAL);
+    document = await vscode.workspace.openTextDocument(source);
     const editor = await vscode.window.showTextDocument(document);
     editor.selection = new vscode.Selection(1, 2, 1, 2);
-    await pause(500);
   });
 
   teardown(async () => {
-    await vscode.commands.executeCommand("workbench.action.closeAllEditors");
     const guide = path.join(root(), ".local-review", "README.md");
-    fs.rmSync(path.join(root(), ".local-review", path.basename(dir)), {
-      recursive: true,
-      force: true,
-    });
-    fs.rmSync(dir, { recursive: true, force: true });
-    if (!hadGuide) {
-      fs.rmSync(guide, { force: true });
-    }
-    if (!hadReviewDir && fs.existsSync(path.dirname(guide))) {
-      fs.rmdirSync(path.dirname(guide));
+    try {
+      fs.rmSync(path.join(root(), ".local-review", path.basename(dir)), {
+        recursive: true,
+        force: true,
+      });
+      fs.rmSync(dir, { recursive: true, force: true });
+      if (!hadGuide) {
+        fs.rmSync(guide, { force: true });
+      }
+      if (!hadReviewDir && fs.existsSync(path.dirname(guide))) {
+        fs.rmdirSync(path.dirname(guide));
+      }
+    } finally {
+      // A dirty editor would make closing ask to save; revert those first.
+      for (const dirty of vscode.workspace.textDocuments.filter((d) => d.isDirty)) {
+        await vscode.window.showTextDocument(dirty);
+        await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
+      }
+      await vscode.commands.executeCommand("workbench.action.closeAllEditors");
     }
   });
 
+  const assertSourceUntouched = () => {
+    assert.strictEqual(document.getText(), ORIGINAL);
+    assert.strictEqual(fs.readFileSync(source, "utf8"), ORIGINAL);
+  };
+
   test("the shortcut opens a focused box; typing and submitting stores the comment", async function () {
     this.timeout(30000);
-    const store = new FileCommentStore(root());
-    await vscode.commands.executeCommand("local-review.addComment");
-    await pause(1500);
-    await vscode.commands.executeCommand("type", { text: "hello inline" });
-    await pause(300);
-    await vscode.commands.executeCommand("editor.action.submitComment");
-    await until(() => store.listForFile(name).length > 0);
+    await typeIntoBox(shortcut, "hello inline", hideBox);
+    await submitBox();
+    await waitFor("the comment to be stored", () => store.listForFile(name).length > 0);
     const threads = store.listForFile(name);
     assert.strictEqual(threads.length, 1, "one thread is stored");
     assert.strictEqual(threads[0].line, 2);
     assert.strictEqual(threads[0].comments[0].body, "hello inline");
-    assert.strictEqual(
-      vscode.window.activeTextEditor?.document.getText() ?? "",
-      "alpha\nbravo\ncharlie\n",
-    );
-    assert.strictEqual(fs.readFileSync(source, "utf8"), "alpha\nbravo\ncharlie\n");
+    assertSourceUntouched();
   });
 
-  test("closing an empty box stores nothing", async function () {
+  test("after submitting, typing goes to the source editor", async function () {
     this.timeout(30000);
-    const store = new FileCommentStore(root());
-    await vscode.commands.executeCommand("local-review.addComment");
-    await pause(1500);
-    await vscode.commands.executeCommand("workbench.action.hideComment");
-    await pause(500);
-    await vscode.commands.executeCommand("editor.action.submitComment");
-    await pause(1000);
-    assert.strictEqual(store.listForFile(name).length, 0);
-    assert.strictEqual(fs.readFileSync(source, "utf8"), "alpha\nbravo\ncharlie\n");
+    await typeIntoBox(shortcut, "focus check", hideBox);
+    await submitBox();
+    await waitFor("the comment to be stored", () => store.listForFile(name).length > 0);
+    const version = document.version;
+    await vscode.commands.executeCommand("type", { text: "Z" });
+    assert.notStrictEqual(
+      document.version,
+      version,
+      "the keystroke after submit reached the editor",
+    );
+    assert.strictEqual(document.getText(), "alpha\nbrZavo\ncharlie\n");
+  });
+
+  // VS Code's own add-comment command hides a thread that is already open on the line; the
+  // extension opens it instead (workbench.action.focusCommentOnCurrentLine, which focuses the
+  // thread widget but not its reply box, so no typing is asserted here). The control: the
+  // shortcut on that line made no second box and no edit, and a box on another line still works.
+  test("the shortcut on a line that already has a comment adds no second thread", async function () {
+    this.timeout(30000);
+    await typeIntoBox(shortcut, "first", hideBox);
+    await submitBox();
+    await waitFor("the first comment to be stored", () => store.listForFile(name).length > 0);
+    await shortcut();
+    // Moving the cursor with the focus (the shortcut left it in the thread) in one step.
+    await vscode.window.showTextDocument(document, {
+      selection: new vscode.Range(2, 1, 2, 1),
+      preserveFocus: false,
+    });
+    await typeIntoBox(shortcut, "other line", hideBox);
+    await submitBox();
+    await waitFor("the other-line comment to be stored", () => store.listForFile(name).length > 1);
+    const threads = store.listForFile(name);
+    assert.deepStrictEqual(
+      threads.map((t) => [t.line, t.comments.map((c) => c.body)]),
+      [
+        [2, ["first"]],
+        [3, ["other line"]],
+      ],
+    );
+    assertSourceUntouched();
+  });
+
+  // Hiding a box keeps what was typed: VS Code holds the draft for that line and the shortcut
+  // brings the same box back with it, so nothing is lost and nothing is stored until submit.
+  test("hiding a box stores nothing, and the shortcut brings the box back with its draft", async function () {
+    this.timeout(30000);
+    await typeIntoBox(shortcut, "draft", hideBox);
+    await hideBox();
+    await wait(300);
+    assert.strictEqual(store.listForFile(name).length, 0, "hiding stored nothing");
+    await typeIntoBox(shortcut, " more", hideBox);
+    await submitBox();
+    await waitFor("the comment to be stored", () => store.listForFile(name).length > 0);
+    assert.deepStrictEqual(bodies(), ["draft more"]);
+    assert.strictEqual(store.listForFile(name).length, 1);
+    assertSourceUntouched();
   });
 });

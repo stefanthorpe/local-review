@@ -378,3 +378,35 @@ test("hiding a box stores nothing, and the shortcut then opens a new empty box t
     assert.equal(threads[0].comments[0].body, "only this");
   });
 });
+
+test("after a comment is stored the keyboard goes back to the source editor in its column", async () => {
+  await withProvider(async ({ editor, provider, type, shown }) => {
+    await provider.startComment(editor.document.uri);
+    assert.deepEqual(shown, []);
+    await type("typed");
+    assert.equal(shown.length, 1);
+    assert.equal(shown[0].doc, editor.document);
+    assert.deepEqual(shown[0].options, { viewColumn: 2, preserveFocus: false });
+  });
+});
+
+test("an empty submit leaves the focus where it is", async () => {
+  await withProvider(async ({ editor, provider, type, shown }) => {
+    await provider.startComment(editor.document.uri);
+    await type("  ");
+    assert.deepEqual(shown, []);
+  });
+});
+
+test("a failure to move the focus does not undo the stored comment", async () => {
+  await withProvider(async ({ editor, provider, type, store, warnings }) => {
+    const vscode = require("vscode");
+    vscode.window.showTextDocument = async () => {
+      throw new Error("no editor");
+    };
+    await provider.startComment(editor.document.uri);
+    await type("still saved");
+    assert.equal(store.listForFile("sub/a").length, 1);
+    assert.deepEqual(warnings, []);
+  });
+});

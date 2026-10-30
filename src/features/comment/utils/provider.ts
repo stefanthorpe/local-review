@@ -513,6 +513,15 @@ export const createCommentProvider = (
     submitted.add(thread);
     thread.dispose();
     refreshForEditor(editor);
+    // Closing the box leaves the keyboard nowhere in particular; put it back in the source editor.
+    try {
+      await vscode.window.showTextDocument(editor.document, {
+        viewColumn: editor.viewColumn,
+        preserveFocus: false,
+      });
+    } catch {
+      // Focus is a courtesy; the comment is already stored.
+    }
     if (first) {
       await offerIgnore(info.root);
     }

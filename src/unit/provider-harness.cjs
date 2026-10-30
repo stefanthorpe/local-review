@@ -35,7 +35,7 @@ const withProvider = async (body, options = {}) => {
     },
   };
   const document = { uri, lineCount: 1, lineAt: () => ({ text: "line" }) };
-  const editor = { document, selection: { active: { line: 0 } } };
+  const editor = { document, viewColumn: 2, selection: { active: { line: 0 } } };
   const folderLookups = [];
   const executed = [];
   // Every disposable the provider is handed or returns, so a test can see what dispose released.
@@ -58,6 +58,8 @@ const withProvider = async (body, options = {}) => {
   const clipboard = [];
   const created = [];
   const prompts = [];
+  // Each showTextDocument call: how the provider hands the keyboard back to the source editor.
+  const shown = [];
   const workspaceFolders = options.noWorkspace
     ? []
     : [{ name: path.basename(root), uri: { scheme: "file", fsPath: root } }];
@@ -99,6 +101,9 @@ const withProvider = async (body, options = {}) => {
     window: {
       visibleTextEditors: [editor],
       activeTextEditor: options.noEditor ? undefined : editor,
+      showTextDocument: async (doc, shownOptions) => {
+        shown.push({ doc, options: shownOptions });
+      },
       showWarningMessage: (m) => warnings.push(m),
       showErrorMessage: (m) => warnings.push(m),
       showInformationMessage: async (message) => {
@@ -224,6 +229,7 @@ const withProvider = async (body, options = {}) => {
       clipboard,
       created,
       prompts,
+      shown,
       workspaceFolders,
       // Runs Copy All against this provider and the same mocked vscode.
       submit: async () => {
