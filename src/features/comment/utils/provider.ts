@@ -9,10 +9,10 @@ import { repin } from "./anchor";
 import { isUnderGitHome, resolveRoot } from "./root";
 import { getEditorFileName } from "../../editor/utils/detector";
 import { formatStandardComment } from "./format";
-import type { CommentInputResult } from "./input";
 
 export interface CommentProvider {
-  startCommentAtLine(uri: vscode.Uri, line: number): Promise<void>;
+  startComment(uri: vscode.Uri): Promise<void>;
+  submitReply(reply: vscode.CommentReply): Promise<void>;
   refreshForEditor(editor?: vscode.TextEditor): void;
   clearAllThreads(): void;
   roots(): string[];
@@ -29,7 +29,6 @@ const NOT_STORABLE =
 
 export const createCommentProvider = (
   context: vscode.ExtensionContext,
-  showCommentInput: () => Promise<CommentInputResult | undefined>,
   copyToClipboard: (text: string) => Promise<boolean>,
   controller = vscode.comments.createCommentController("localReview", "Local Review"),
   registerCommands = true,
@@ -47,19 +46,44 @@ export const createCommentProvider = (
   // Roots that fell back to the workspace folder because no repository holds the file; they go
   // when that folder is closed, while repository roots stay for the session.
   const fallbackRoots = new Set<string>();
-  const storeFor = (uri: vscode.Uri) => {
-    if (uri.scheme !== "file") {
-      return undefined;
-    }
+  const resolveUncached = (uri: vscode.Uri) => {
     const folder = vscode.workspace.getWorkspaceFolder(uri);
-    const resolved = resolveRoot(
+    const found = resolveRoot(
       uri.fsPath,
       os.homedir(),
       folder?.uri.scheme === "file" ? folder.uri.fsPath : undefined,
     );
+    return found && { ...found, folder };
+  };
+  // Where a document's comments live. Every explicit path (the shortcut's guard, a submit, a
+  // reply, a render) resolves afresh, so a repository created after the document opened is seen.
+  const resolveFor = (uri: vscode.Uri) =>
+    uri.scheme === "file" ? resolveUncached(uri) : undefined;
+  // Only the gutter, which asks on every render, reads this cache: it needs a walk up the file
+  // system each time. Only an answer is cached, never "no root", so a repository created later is
+  // offered at once. Dropped when the document closes, the workspace folders change or a `.git`
+  // appears or goes.
+  const rootCache = new Map<string, ReturnType<typeof resolveUncached>>();
+  const cachedRootFor = (uri: vscode.Uri) => {
+    if (uri.scheme !== "file") {
+      return undefined;
+    }
+    const key = uri.toString();
+    let found = rootCache.get(key);
+    if (!found) {
+      found = resolveUncached(uri);
+      if (found) {
+        rootCache.set(key, found);
+      }
+    }
+    return found;
+  };
+  const storeFor = (uri: vscode.Uri) => {
+    const resolved = resolveFor(uri);
     if (!resolved) {
       return undefined;
     }
+    const folder = resolved.folder;
     let store = stores.get(resolved.root);
     if (!store) {
       if (
@@ -150,14 +174,24 @@ export const createCommentProvider = (
     }
   };
   const forget = (key: string) => {
+    rootCache.delete(key);
     clear(key);
     snapshots.delete(key);
     clearTimeout(timers.get(key));
     timers.delete(key);
     release(key);
   };
+  // Everything the provider registered with VS Code (also handed to the extension context, which
+  // disposes it a second time at shutdown). A provider built on a stand-in context, as the tests
+  // do, must still release its watchers and listeners itself.
+  const own: vscode.Disposable[] = [];
+  let disposed = false;
+  const register = (...items: vscode.Disposable[]) => {
+    own.push(...items);
+    context.subscriptions.push(...items);
+  };
   const refreshForEditor = (editor?: vscode.TextEditor) => {
-    if (!editor) {
+    if (!editor || disposed) {
       return;
     }
     const uri = editor.document.uri;
@@ -289,7 +323,7 @@ export const createCommentProvider = (
     }
   };
   if (registerCommands) {
-    context.subscriptions.push(
+    register(
       vscode.commands.registerCommand("localReview.deleteComment", (thread: vscode.CommentThread) =>
         operate(thread, (s, f, id) => s.deleteThread(f, id)),
       ),
@@ -299,23 +333,39 @@ export const createCommentProvider = (
       vscode.commands.registerCommand("localReview.reopen", (thread: vscode.CommentThread) =>
         operate(thread, (s, f, id) => s.reopen(f, id)),
       ),
+      vscode.commands.registerCommand("localReview.add", (reply: vscode.CommentReply) =>
+        submitReply(reply),
+      ),
       vscode.commands.registerCommand("localReview.reply", (reply: vscode.CommentReply) =>
-        operate(reply.thread, (s, f, id) => s.reply(f, id, "user", reply.text), reply.text),
+        submitReply(reply),
       ),
     );
   }
+  controller.options = { placeHolder: "Comment for the agent (Ctrl+Enter to save)" };
+  controller.commentingRangeProvider = {
+    // The gutter "+" is offered for every line of a document whose comments can be stored.
+    provideCommentingRanges: (document) =>
+      cachedRootFor(document.uri)
+        ? [new vscode.Range(0, 0, Math.max(0, document.lineCount - 1), 0)]
+        : undefined,
+  };
   const watcher = vscode.workspace.createFileSystemWatcher("**/.local-review/**/*.review.json");
   const folderWatcher = vscode.workspace.createFileSystemWatcher("**/.local-review");
+  const gitWatcher = vscode.workspace.createFileSystemWatcher("**/.git");
   function onChange() {
     for (const editor of vscode.window.visibleTextEditors) {
       refreshForEditor(editor);
     }
   }
-  context.subscriptions.push(
+  register(
     watcher,
     folderWatcher,
+    gitWatcher,
+    gitWatcher.onDidCreate(() => rootCache.clear()),
+    gitWatcher.onDidDelete(() => rootCache.clear()),
     vscode.workspace.onDidCloseTextDocument((document) => forget(document.uri.toString())),
     vscode.workspace.onDidChangeWorkspaceFolders((event) => {
+      rootCache.clear();
       for (const folder of event.removed) {
         if (fallbackRoots.delete(folder.uri.fsPath)) {
           stores.delete(folder.uri.fsPath);
@@ -386,7 +436,11 @@ export const createCommentProvider = (
       void vscode.window.showWarningMessage(`Failed to update the ignore rules: ${error}`);
     }
   };
-  const startCommentAtLine = async (uri: vscode.Uri, line: number) => {
+  // Hands over to VS Code's own add-comment command, the one behind the gutter "+". It asks the
+  // commenting range provider for the line, opens an empty reply box under it and puts the
+  // keyboard in it. Typing and submitting there reaches localReview.add, which writes the comment.
+  // On a line that already has a stored thread it opens that thread for a reply instead.
+  const startComment = async (uri: vscode.Uri) => {
     const editor = vscode.window.activeTextEditor;
     if (uri.scheme === "git" || uri.scheme === "diff") {
       void vscode.window.showWarningMessage(
@@ -394,8 +448,7 @@ export const createCommentProvider = (
       );
       return;
     }
-    const info = storeFor(uri);
-    if (!info || !editor) {
+    if (!resolveFor(uri) || !editor) {
       void vscode.window.showWarningMessage(
         !editor
           ? NO_EDITOR
@@ -409,36 +462,92 @@ export const createCommentProvider = (
       );
       return;
     }
-    const result = await showCommentInput();
-    if (!result) {
+    // VS Code's add-comment command toggles a thread that already sits on the line, which would
+    // hide one the user is looking at. Open that thread for a reply instead.
+    const line = editor.selection.active.line;
+    const existing = [...(threads.get(uri.toString())?.values() ?? [])].find(
+      (thread) => thread.range?.start.line === line,
+    );
+    if (existing) {
+      existing.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+      await vscode.commands.executeCommand("workbench.action.focusCommentOnCurrentLine");
       return;
     }
-    const dir = path.join(info.root, ".local-review");
-    const first = !fs.existsSync(path.join(dir, "README.md"));
-    try {
-      info.store.addThread(info.relative, line + 1, editor.document.lineAt(line).text, result.text);
-    } catch (error) {
-      await keepText(error, result.text);
+    await vscode.commands.executeCommand("workbench.action.addComment");
+  };
+  // Template boxes (the empty thread VS Code opens) whose comment is already stored. The box is
+  // disposed after the store, but VS Code can still deliver a second submit for it; that one is
+  // ignored. The check and the add run with no await between them, so two submits cannot both pass.
+  const submitted = new WeakSet<vscode.CommentThread>();
+  // A comment typed into the empty box VS Code opens (from the shortcut or the gutter "+")
+  // becomes a stored thread.
+  const submitTemplate = async (thread: vscode.CommentThread, typed: string) => {
+    if (submitted.has(thread)) {
       return;
+    }
+    const text = typed.trim();
+    if (!text) {
+      void vscode.window.showInformationMessage("Empty comment not saved.");
+      return;
+    }
+    const uri = thread.uri;
+    const line = thread.range?.start.line ?? 0;
+    const info = storeFor(uri);
+    const editor = vscode.window.visibleTextEditors.find(
+      (e) => e.document.uri.toString() === uri.toString(),
+    );
+    if (!info || !editor) {
+      await keepText(
+        new Error(info ? "the file is not open in an editor" : "no store root for this file"),
+        text,
+      );
+      return;
+    }
+    const first = !fs.existsSync(path.join(info.root, ".local-review", "README.md"));
+    try {
+      info.store.addThread(info.relative, line + 1, editor.document.lineAt(line).text, text);
+    } catch (error) {
+      await keepText(error, text);
+      return;
+    }
+    submitted.add(thread);
+    thread.dispose();
+    refreshForEditor(editor);
+    // Closing the box leaves the keyboard nowhere in particular; put it back in the source editor.
+    try {
+      await vscode.window.showTextDocument(editor.document, {
+        viewColumn: editor.viewColumn,
+        preserveFocus: false,
+      });
+    } catch {
+      // Focus is a courtesy; the comment is already stored.
     }
     if (first) {
       await offerIgnore(info.root);
     }
-    refreshForEditor(editor);
     if (vscode.workspace.getConfiguration("localReview").get<boolean>("copyOnComment", false)) {
       await copyToClipboard(
         formatStandardComment({
           fileName: getEditorFileName(editor),
           lineNumber: line,
-          text: result.text,
+          text,
         }),
       );
     }
+  };
+  const submitReply = async (reply: vscode.CommentReply) => {
+    const { thread } = reply;
+    if (thread.contextValue === undefined) {
+      await submitTemplate(thread, reply.text);
+      return;
+    }
+    operate(thread, (s, f, id) => s.reply(f, id, "user", reply.text), reply.text);
   };
   const clearAllThreads = () => {
     for (const key of threads.keys()) {
       clear(key);
     }
+    rootCache.clear();
     snapshots.clear();
     for (const timer of timers.values()) {
       clearTimeout(timer);
@@ -452,12 +561,20 @@ export const createCommentProvider = (
     dirWatchers.clear();
   };
   return {
-    startCommentAtLine,
+    startComment,
+    submitReply,
     refreshForEditor,
     clearAllThreads,
     roots: () => [...stores.keys()],
     dispose: () => {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
       clearAllThreads();
+      for (const item of own) {
+        item.dispose();
+      }
       controller.dispose();
     },
   };

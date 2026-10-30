@@ -29,7 +29,7 @@ test("addThread on a refused file preserves the user's text and names the bad id
       const data = JSON.parse(fs.readFileSync(name, "utf8"));
       data.threads[0].id = "bad id";
       fs.writeFileSync(name, JSON.stringify(data));
-      await provider.startCommentAtLine(editor.document.uri, 0);
+      await provider.startComment(editor.document.uri);
       assert.equal(warnings.length, 1);
       assert.match(warnings[0], /my typed comment/);
       assert.match(warnings[0], /"bad id"/);
@@ -42,7 +42,7 @@ test("addThread on a refused file preserves the user's text and names the bad id
 
 test("a comment from the read-only git side says so instead of blaming the workspace", async () => {
   await withProvider(async ({ editor, provider, warnings }) => {
-    await provider.startCommentAtLine({ ...editor.document.uri, scheme: "git" }, 0);
+    await provider.startComment({ ...editor.document.uri, scheme: "git" });
     assert.equal(warnings.length, 1);
     assert.match(warnings[0], /read-only/);
     assert.doesNotMatch(warnings[0], /No workspace folder/);
@@ -79,7 +79,7 @@ test("the save-failure toast is honest about a failed copy and never embeds a lo
     async ({ editor, provider, warnings, store }) => {
       store.addThread("sub/a", 1, "line", "seed");
       refuse(store);
-      await provider.startCommentAtLine(editor.document.uri, 0);
+      await provider.startComment(editor.document.uri);
       assert.ok(warnings[0].length < 600);
       assert.match(warnings[0], /copied to the clipboard/);
     },
@@ -89,7 +89,7 @@ test("the save-failure toast is honest about a failed copy and never embeds a lo
     async ({ editor, provider, warnings, store }) => {
       store.addThread("sub/a", 1, "line", "seed");
       refuse(store);
-      await provider.startCommentAtLine(editor.document.uri, 0);
+      await provider.startComment(editor.document.uri);
       assert.doesNotMatch(warnings[0], /was copied/);
       assert.match(warnings[0], /could not be copied/);
       assert.match(warnings[0], /my typed comment/);

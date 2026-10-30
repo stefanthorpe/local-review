@@ -2,7 +2,7 @@
   "name": "local-review",
   "displayName": "Local Review (file-backed)",
   "description": "Review comments on diff and editor lines, saved as files that AI agents can read, reply to and resolve",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "stefanthorpe",
   "license": "MIT",
   "repository": {
@@ -61,6 +61,10 @@
         "title": "Reopen"
       },
       {
+        "command": "localReview.add",
+        "title": "Add Comment"
+      },
+      {
         "command": "localReview.reply",
         "title": "Reply"
       }
@@ -111,11 +115,19 @@
       ],
       "comments/commentThread/context": [
         {
+          "command": "localReview.add",
+          "when": "commentController == localReview && commentThreadIsEmpty"
+        },
+        {
           "command": "localReview.reply",
-          "when": "commentController == localReview"
+          "when": "commentController == localReview && !commentThreadIsEmpty"
         }
       ],
       "commandPalette": [
+        {
+          "command": "localReview.add",
+          "when": "false"
+        },
         {
           "command": "localReview.reply",
           "when": "false"
@@ -152,7 +164,7 @@
     "prepare": "lefthook install",
     "test": "vscode-test",
     "test:unit": "pnpm run compile-tests && node --test src/unit/*.test.cjs",
-    "test:all": "pnpm run compile-tests && vscode-test",
+    "test:all": "pnpm run compile-tests && pnpm run compile && vscode-test",
     "knip": "knip"
   },
   "devDependencies": {

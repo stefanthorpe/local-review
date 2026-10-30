@@ -1,18 +1,16 @@
 import * as vscode from "vscode";
 import { copyToClipboard } from "./features/clipboard/utils/clipboard-manager";
 import { createCommentProvider } from "./features/comment/utils/provider";
-import { showCommentInput } from "./features/comment/utils/input";
 import type { CommentContext } from "./features/comment/types/context";
 import { addComment, submitComments } from "./features/comment/utils/actions";
 
 export function activate(context: vscode.ExtensionContext) {
   console.log("Local Review extension is now active");
 
-  const commentProvider = createCommentProvider(context, showCommentInput, copyToClipboard);
+  const commentProvider = createCommentProvider(context, copyToClipboard);
 
   const ctx: CommentContext = {
     commentProvider,
-    showCommentInput,
     copyToClipboard,
   };
 

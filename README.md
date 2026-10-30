@@ -29,8 +29,10 @@ Local Review streamlines this workflow by letting you add comments directly in V
 
 1. Place cursor on the line you want to comment
 2. Press `Cmd+Shift+C` (macOS) or `Ctrl+Shift+C` (Windows/Linux)
-3. Enter your comment and press Enter
+3. Type your comment in the box that opens under the line, then press `Ctrl+Enter` (`Cmd+Enter` on macOS) or click **Add Comment**. `Escape` hides the box without saving; the shortcut brings it back with what you typed.
 4. The comment appears as a discussion thread on that line
+
+You can also click the `+` in the gutter next to any line of a file that can store comments, or use the editor context menu. Nothing is saved until you submit. An empty comment is not saved. On a line that already has a comment, the shortcut opens that thread (it does not close it); click in its reply box to answer. If another extension (for example GitHub Pull Requests) also offers comments on the line, VS Code asks which one to use.
 
 ### Copying All Comments
 

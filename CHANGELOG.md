@@ -2,6 +2,15 @@
 
 All notable changes to this extension are listed here.
 
+## [0.1.2]
+
+- Add a comment by typing in place: `Ctrl+Shift+C` (or the editor menu) opens a box under the line and puts the cursor in it, instead of an input at the top of the window. Press `Ctrl+Enter` (`Cmd+Enter` on macOS) or click **Add Comment** to save; `Escape` hides the box and keeps what you typed.
+- On a line that already has a comment, the shortcut opens that thread instead of closing it; click in its reply box to answer.
+- After you save, the cursor is back in the file.
+- The gutter `+` now adds a comment on any line of a file that can store comments.
+- A blank comment is not saved and says so.
+- The new comment appears as soon as you save it, before any prompt about ignoring `.local-review/`.
+
 ## [0.1.1]
 
 - Copy All finds repos under `~/git` and under the open folders by searching for `.local-review`, instead of remembering roots between sessions.

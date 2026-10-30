@@ -3,7 +3,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import type { CommentAction } from "../types/context";
-import { getCurrentLineInfo } from "../../editor/utils/detector";
 import { discoverReviewRoots } from "./discover";
 import { isNoRepository, ownGitDir, runGit } from "./git";
 import { repin } from "./anchor";
@@ -17,13 +16,7 @@ export const addComment: CommentAction = async (ctx) => {
     return;
   }
 
-  const lineInfo = getCurrentLineInfo();
-  if (!lineInfo) {
-    vscode.window.showWarningMessage("No active editor found");
-    return;
-  }
-
-  await ctx.commentProvider.startCommentAtLine(editor.document.uri, lineInfo.lineNumber);
+  await ctx.commentProvider.startComment(editor.document.uri);
 };
 
 const MAX_SOURCE_BYTES = 5 * 1024 * 1024;

@@ -102,17 +102,12 @@ test("provider preserves threads, deduplicates warnings, handles colon ids and f
     data.threads[0].id = "t:fix:1";
     fs.writeFileSync(review, JSON.stringify(data));
     const subscriptions = [];
-    const provider = createCommentProvider(
-      { subscriptions },
-      async () => undefined,
-      async () => true,
-      controller,
-    );
+    const provider = createCommentProvider({ subscriptions }, async () => true, controller);
     provider.refreshForEditor(editor);
     const thread = created[0];
     const diff = { ...document, uri: { ...uri, scheme: "git" } };
     provider.refreshForEditor({ document: diff });
-    await provider.startCommentAtLine(diff.uri, 0);
+    await provider.startComment(diff.uri);
     assert.equal(created.length, 1);
     warnings.length = 0;
     document.lineAt = () => ({ text: "changed" });
@@ -199,13 +194,7 @@ test("provider re-renders an external write even when the VS Code watcher stays 
     const { FileCommentStore } = require("../../out/features/comment/utils/file-store");
     const store = new FileCommentStore(root);
     store.addThread("sub/a", 1, "line", "body");
-    provider = createCommentProvider(
-      { subscriptions: [] },
-      async () => undefined,
-      async () => true,
-      controller,
-      false,
-    );
+    provider = createCommentProvider({ subscriptions: [] }, async () => true, controller, false);
     provider.refreshForEditor(editor);
     assert.equal(thread.comments.length, 1);
     store.reply("sub/a", store.listForFile("sub/a")[0].id, "agent", "external reply");

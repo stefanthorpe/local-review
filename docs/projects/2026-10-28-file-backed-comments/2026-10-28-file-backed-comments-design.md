@@ -1,5 +1,5 @@
 ---
-version: 7
+version: 8
 ---
 
 # File-Backed Review Comments - Architecture Design
@@ -174,7 +174,7 @@ so an agent's annotations survive.
 |-----------|----------------|
 | `FileCommentStore` | Load/save review files; `addThread`, `reply`, `resolve`, `reopen`, `deleteThread`, `listForFile`, `listAll`; atomic writes (temp + rename + directory fsync) |
 | `anchor` util | Pure function: given thread line + anchor + document lines, return re-pinned line and `outdated` flag |
-| `CommentProvider` (extended) | One VS Code comment per thread comment; native resolved state (collapsed); Reply / Resolve / Reopen / Delete actions via `comments/commentThread/*` menus |
+| `CommentProvider` (extended) | The gutter `commentingRangeProvider` (answers cached per open document, never a "no root" answer) and the add-comment command it hands to VS Code (the empty box under the line); one VS Code comment per thread comment; native resolved state (collapsed); Reply / Resolve / Reopen / Delete actions via `comments/commentThread/*` menus |
 | Review watcher | Two layers. A `FileSystemWatcher` on `.local-review/**/*.review.json`, plus a direct non-recursive `fs.watch` fallback on the directory that holds each open document's review file, or on the nearest existing ancestor (up to the store root when `.local-review` itself is missing, with the folder watcher's create event also subscribed) before the file exists, because the recursive watcher can miss a subtree created moments earlier. On Linux `fs.watch` on a deleted directory emits `rename`, not `error`, so an entry whose directory is gone or whose inode changed is closed and re-armed. Per-document entries are dropped when the document closes, and a document's key leaves an ancestor watch once its own directory is watched. Events compare snapshot hashes and update changed threads in place |
 | Agent README | `.local-review/README.md` versioned and rewritten on review writes: schema plus the three operations (append reply, set `status`, remove thread) |
 
@@ -247,8 +247,42 @@ under `~/git` and git runs repo-local config during read-only commands.
 ## Behaviour Changes
 
 - **Copy All** (`Ctrl+Shift+Enter`) copies an open-thread prompt and no longer clears anything.
-- **Add comment** writes immediately. `copyOnComment` still copies the single
-  comment in the old `path:line text` format when enabled; it defaults to false.
+- **Add comment** (`Ctrl+Shift+C`, the editor menu, or the gutter `+`) opens an empty
+  reply box under the line, and you type in place. The shortcut and menu run VS Code's own
+  `workbench.action.addComment`, the command behind the gutter `+`, after the extension's
+  guards (diff read-only side, no editor, untitled, not local, no store root). VS Code asks
+  the `commentingRangeProvider` for the line, creates a template thread (an empty thread
+  with no context value), reveals it and puts the keyboard in its reply editor. The
+  extension never creates that thread itself: a thread made through the API is not a
+  template thread, and VS Code does not focus its reply editor.
+- The box has an **Add Comment** button (`localReview.add`, shown while the thread is
+  empty) and, on stored threads, a **Reply** button (`localReview.reply`); both call the
+  same handler. Submitting a template thread stores a thread, disposes the box (VS Code
+  clears it), and refreshes the editor so the stored thread renders at once, before any
+  first-use ignore prompt, then returns the keyboard to the source editor
+  (`showTextDocument` in the editor's column; without it, typing after a save reached
+  nothing). A repeated submit of the same box is ignored. A whitespace-only submit writes
+  nothing and shows "Empty comment not saved.". Escape (or `hideComment`) hides the box
+  and VS Code keeps the draft for that line; the shortcut brings the same box back with
+  the draft, so nothing is lost and nothing is written until text is submitted.
+- On a line that already has a stored thread, VS Code's add-comment command toggles it,
+  which would hide a thread the user is looking at. The shortcut instead sets that
+  thread's `collapsibleState` to Expanded and runs
+  `workbench.action.focusCommentOnCurrentLine`. In VS Code 1.144 that command focuses the
+  thread widget, not its reply box (it reveals with widget focus, not editor focus), so
+  the user clicks into Reply; verified in the real host, where typing after the command
+  did not reach the reply. The toggle path that does focus the reply box also collapses an
+  open thread and cannot be made deterministic from the extension host, so it is not
+  used. When another extension also offers a range at the cursor, VS Code shows its
+  provider picker, VS Code's native behaviour, accepted.
+- `copyOnComment` still copies the single comment in the old `path:line text` format when
+  enabled; it defaults to false. The gutter `+` is offered only for documents that can
+  store comments (a saved file under a `~/git` repo or an open folder). Only the gutter
+  reads a cache of where a document resolves to, and only answers are cached: "no root"
+  is never stored, so a repository created later is offered at once. The cache drops when
+  the document closes, the workspace folders change, or a `.git` appears or goes. The
+  shortcut's guard, submits and replies always resolve afresh, so a nested `git init`
+  after the document opened sends the comment to the nearer repository.
 - **Needs the agent** means `status` is `open` and the last comment's author is `user`.
   Copy All lists only those threads, with the latest user comment as the excerpt,
   then an "awaiting the user" section (path, line and id only) for open threads where
@@ -308,8 +342,31 @@ TDD per the RS universal rules.
   nearest of duplicate matches.
 - Integration (`@vscode/test`, already in the repo): an external write to a review
   file updates the rendered thread; a self-write does not double-render.
+- Integration, real extension and real VS Code: the add-comment shortcut opens a focused
+  box, typed text submitted with `editor.action.submitComment` is stored on that line with
+  the source file unchanged; after the save a keystroke reaches the source editor; hiding a
+  box stores nothing and the shortcut brings it back with its draft; the shortcut on a line
+  with a stored thread adds no second thread. Waits poll observable conditions (a keystroke
+  that edited the document means the box did not have focus yet) and fail loudly at a
+  deadline; none is a fixed sleep.
 
 ## Changelog
+
+### v8 — 2026-10-30
+
+- Adding a comment types in place, through VS Code's native add-comment flow: the shortcut
+  and menu run `workbench.action.addComment`, so the template thread VS Code creates gets
+  the keyboard, exactly as the gutter `+` does. The extension creates no thread of its
+  own, so no draft bookkeeping exists. The first submit stores the comment (Add Comment
+  button, `localReview.add`; Reply stays for stored threads), ignores repeats, refuses
+  whitespace with a message, and renders the stored thread before the ignore prompt.
+- The commenting range lookup is cached per open document, answers only. Explicit paths
+  (shortcut guard, submit, reply, render) resolve afresh; a `**/.git` watcher drops the cache.
+- The provider disposes every watcher, listener and command it registered, so a stand-in
+  context in tests no longer leaks a watcher into later tests.
+- The shortcut on a line with a stored thread expands and focuses it instead of toggling it
+  shut; the keyboard returns to the editor after a save; the box carries a placeholder.
+- Integration test drives the real host: shortcut, type, submit, stored comment.
 
 ### v7 — 2026-10-29
 
