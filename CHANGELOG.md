@@ -4,9 +4,11 @@ All notable changes to this extension are listed here.
 
 ## [0.1.2]
 
-- Add a comment by typing in place: `Ctrl+Shift+C` (or the editor menu) opens an inline box under the line instead of an input at the top of the window.
+- Add a comment by typing in place: `Ctrl+Shift+C` (or the editor menu) opens a box under the line and puts the cursor in it, instead of an input at the top of the window. Press `Ctrl+Enter` or click **Add Comment** to save; `Escape` closes the box.
+- On a line that already has a comment, the shortcut opens or closes that thread.
 - The gutter `+` now adds a comment on any line of a file that can store comments.
-- An empty submit writes nothing, and a collapsed empty draft is cleaned up.
+- A blank comment is not saved and says so.
+- The new comment appears as soon as you save it, before any prompt about ignoring `.local-review/`.
 
 ## [0.1.1]
 
