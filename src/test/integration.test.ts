@@ -87,22 +87,17 @@ suite("Review watcher", () => {
     if (madeGuide) {
       fs.writeFileSync(guide, "test guide", { flag: "wx" });
     }
-    await provider.startCommentAtLine(document.uri, 0);
-    if (stopped) {
-      return;
-    }
-    // Starting a comment opens an empty inline draft box and writes nothing.
+    // The empty box VS Code opens for a new comment (as for the gutter plus) is a template
+    // thread: no context value, and writing nothing until a comment is submitted.
+    const draft = controller.createCommentThread(document.uri, new vscode.Range(0, 0, 0, 0), []);
     assert.strictEqual(renders, 1);
-    const draft = rendered!;
     assert.strictEqual(draft.comments.length, 0);
-    assert.strictEqual(draft.canReply, true);
-    assert.strictEqual(draft.collapsibleState, vscode.CommentThreadCollapsibleState.Expanded);
     assert.strictEqual(store.listForFile(name).length, 0);
     await provider.submitReply({ thread: draft, text: "self" });
     if (stopped) {
       return;
     }
-    // Submitting stores the thread, replaces the draft and renders the stored thread once.
+    // Submitting stores the thread, replaces the box and renders the stored thread once.
     assert.strictEqual(store.listForFile(name).length, 1);
     assert.strictEqual(disposals, 1);
     assert.strictEqual(renders, 2);
@@ -212,5 +207,93 @@ suite("Real comment controller commands", () => {
         fs.rmdirSync(path.dirname(guide));
       }
     }
+  });
+});
+
+suite("Real inline comment box", () => {
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const until = async (condition: () => boolean, ms = 8000) => {
+    const deadline = Date.now() + ms;
+    while (!condition() && Date.now() < deadline) {
+      await pause(100);
+    }
+  };
+  const root = () => vscode.workspace.workspaceFolders![0].uri.fsPath;
+  let dir = "";
+  let source = "";
+  let name = "";
+  let hadGuide = false;
+  let hadReviewDir = false;
+
+  setup(async function () {
+    this.timeout(20000);
+    const extension = vscode.extensions.getExtension("stefanthorpe.local-review");
+    assert.ok(extension);
+    await extension.activate();
+    dir = fs.mkdtempSync(path.join(root(), "real-box-"));
+    name = `${path.basename(dir)}/source.txt`;
+    source = path.join(dir, "source.txt");
+    const guide = path.join(root(), ".local-review", "README.md");
+    hadGuide = fs.existsSync(guide);
+    hadReviewDir = fs.existsSync(path.dirname(guide));
+    // Seed the directory so the first-use ignore prompt does not wait on nobody.
+    fs.mkdirSync(path.dirname(guide), { recursive: true });
+    if (!hadGuide) {
+      fs.writeFileSync(guide, "test guide", { flag: "wx" });
+    }
+    fs.writeFileSync(source, "alpha\nbravo\ncharlie\n");
+    const document = await vscode.workspace.openTextDocument(source);
+    const editor = await vscode.window.showTextDocument(document);
+    editor.selection = new vscode.Selection(1, 2, 1, 2);
+    await pause(500);
+  });
+
+  teardown(async () => {
+    await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+    const guide = path.join(root(), ".local-review", "README.md");
+    fs.rmSync(path.join(root(), ".local-review", path.basename(dir)), {
+      recursive: true,
+      force: true,
+    });
+    fs.rmSync(dir, { recursive: true, force: true });
+    if (!hadGuide) {
+      fs.rmSync(guide, { force: true });
+    }
+    if (!hadReviewDir && fs.existsSync(path.dirname(guide))) {
+      fs.rmdirSync(path.dirname(guide));
+    }
+  });
+
+  test("the shortcut opens a focused box; typing and submitting stores the comment", async function () {
+    this.timeout(30000);
+    const store = new FileCommentStore(root());
+    await vscode.commands.executeCommand("local-review.addComment");
+    await pause(1500);
+    await vscode.commands.executeCommand("type", { text: "hello inline" });
+    await pause(300);
+    await vscode.commands.executeCommand("editor.action.submitComment");
+    await until(() => store.listForFile(name).length > 0);
+    const threads = store.listForFile(name);
+    assert.strictEqual(threads.length, 1, "one thread is stored");
+    assert.strictEqual(threads[0].line, 2);
+    assert.strictEqual(threads[0].comments[0].body, "hello inline");
+    assert.strictEqual(
+      vscode.window.activeTextEditor?.document.getText() ?? "",
+      "alpha\nbravo\ncharlie\n",
+    );
+    assert.strictEqual(fs.readFileSync(source, "utf8"), "alpha\nbravo\ncharlie\n");
+  });
+
+  test("closing an empty box stores nothing", async function () {
+    this.timeout(30000);
+    const store = new FileCommentStore(root());
+    await vscode.commands.executeCommand("local-review.addComment");
+    await pause(1500);
+    await vscode.commands.executeCommand("workbench.action.hideComment");
+    await pause(500);
+    await vscode.commands.executeCommand("editor.action.submitComment");
+    await pause(1000);
+    assert.strictEqual(store.listForFile(name).length, 0);
+    assert.strictEqual(fs.readFileSync(source, "utf8"), "alpha\nbravo\ncharlie\n");
   });
 });

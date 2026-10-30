@@ -35,7 +35,9 @@ const withProvider = async (body, options = {}) => {
     },
   };
   const document = { uri, lineCount: 1, lineAt: () => ({ text: "line" }) };
-  const editor = { document };
+  const editor = { document, selection: { active: { line: 0 } } };
+  const folderLookups = [];
+  const executed = [];
   const disposable = () => ({ dispose() {} });
   const handlers = {};
   const commands = {};
@@ -58,8 +60,10 @@ const withProvider = async (body, options = {}) => {
       get workspaceFolders() {
         return workspaceFolders;
       },
-      getWorkspaceFolder: () =>
-        options.noWorkspace ? undefined : { uri: { scheme: "file", fsPath: root } },
+      getWorkspaceFolder: (u) => {
+        folderLookups.push(u);
+        return options.noWorkspace ? undefined : { uri: { scheme: "file", fsPath: root } };
+      },
       asRelativePath: (u) => path.relative(root, u.fsPath),
       createFileSystemWatcher: () => silent,
       onDidChangeTextDocument: disposable,
@@ -87,6 +91,7 @@ const withProvider = async (body, options = {}) => {
       },
       showInformationMessage: async (message) => {
         prompts.push(message);
+        options.onPrompt?.(message, created);
         return options.answer;
       },
     },
@@ -94,6 +99,20 @@ const withProvider = async (body, options = {}) => {
       registerCommand: (name, fn) => {
         commands[name] = fn;
         return disposable();
+      },
+      // Stands in for VS Code's own handler of the add-comment command: it asks the controller
+      // for an empty template thread (no context value) on the cursor line, as the gutter plus does.
+      executeCommand: async (name) => {
+        executed.push(name);
+        if (name === "workbench.action.addComment" && !options.addCommentNoop) {
+          const line = editor.selection.active.line;
+          const thread = controller.createCommentThread(
+            uri,
+            new vscode.Range(line, 0, line, 0),
+            [],
+          );
+          thread.canReply = true;
+        }
       },
     },
     Range: function (...args) {
@@ -146,13 +165,14 @@ const withProvider = async (body, options = {}) => {
       controller,
       options.registerCommands ?? true,
     );
-    // Types `text` into the newest live draft box, as the user would, and submits it.
+    // Types `text` into the newest live template box (an empty thread with no context value), as
+    // the user would, and submits it.
     const type = async (text) => {
-      const draft = created
-        .filter((t) => !t.disposed && t.contextValue === "localReviewDraft")
+      const box = created
+        .filter((t) => !t.disposed && t.contextValue === undefined && t.comments.length === 0)
         .at(-1);
-      assert.ok(draft, "no draft box is open");
-      await commands["localReview.reply"]({ thread: draft, text });
+      assert.ok(box, "no comment box is open");
+      await commands["localReview.reply"]({ thread: box, text });
     };
     if (options.input !== undefined) {
       // `input` simulates the user typing that text into the inline box each time one opens.
@@ -174,6 +194,8 @@ const withProvider = async (body, options = {}) => {
       controller,
       inputBoxes,
       type,
+      executed,
+      folderLookups,
       warnings,
       clipboard,
       created,

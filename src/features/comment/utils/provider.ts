@@ -11,7 +11,7 @@ import { getEditorFileName } from "../../editor/utils/detector";
 import { formatStandardComment } from "./format";
 
 export interface CommentProvider {
-  startCommentAtLine(uri: vscode.Uri, line: number): Promise<void>;
+  startCommentAtLine(uri: vscode.Uri): Promise<void>;
   submitReply(reply: vscode.CommentReply): Promise<void>;
   refreshForEditor(editor?: vscode.TextEditor): void;
   clearAllThreads(): void;
@@ -24,7 +24,6 @@ const NO_EDITOR = "Open the file in an editor to comment on it.";
 const NOT_LOCAL = "Comments can only be saved for files on this machine.";
 const NOT_IN_REPO =
   "Comments are saved in the git repository that holds the file; this file under ~/git is not in one.";
-const DRAFT = "localReviewDraft";
 const NOT_STORABLE =
   "Comments are only saved for files in a git repository under ~/git, or under the open folder.";
 
@@ -47,20 +46,28 @@ export const createCommentProvider = (
   // Roots that fell back to the workspace folder because no repository holds the file; they go
   // when that folder is closed, while repository roots stay for the session.
   const fallbackRoots = new Set<string>();
-  // Open draft boxes (empty threads waiting for the first comment), by document and line.
-  const drafts = new Map<string, vscode.CommentThread>();
-  const draftKey = (uri: vscode.Uri, line: number) => `${uri.toString()}#${line}`;
-  const resolveFor = (uri: vscode.Uri) => {
-    if (uri.scheme !== "file") {
-      return undefined;
-    }
+  const resolveUncached = (uri: vscode.Uri) => {
     const folder = vscode.workspace.getWorkspaceFolder(uri);
-    const resolved = resolveRoot(
+    const found = resolveRoot(
       uri.fsPath,
       os.homedir(),
       folder?.uri.scheme === "file" ? folder.uri.fsPath : undefined,
     );
-    return resolved && { ...resolved, folder };
+    return found && { ...found, folder };
+  };
+  // Where a document's comments live, resolved once per open document: the gutter asks on every
+  // render, and the answer needs a walk up the file system. Dropped when the document closes or
+  // the workspace folders change.
+  const resolved = new Map<string, ReturnType<typeof resolveUncached>>();
+  const resolveFor = (uri: vscode.Uri) => {
+    if (uri.scheme !== "file") {
+      return undefined;
+    }
+    const key = uri.toString();
+    if (!resolved.has(key)) {
+      resolved.set(key, resolveUncached(uri));
+    }
+    return resolved.get(key);
   };
   const storeFor = (uri: vscode.Uri) => {
     const resolved = resolveFor(uri);
@@ -157,16 +164,8 @@ export const createCommentProvider = (
       }
     }
   };
-  const dropDraft = (draftId: string) => {
-    drafts.get(draftId)?.dispose();
-    drafts.delete(draftId);
-  };
   const forget = (key: string) => {
-    for (const [draftId, draft] of drafts) {
-      if (draft.uri.toString() === key) {
-        dropDraft(draftId);
-      }
-    }
+    resolved.delete(key);
     clear(key);
     snapshots.delete(key);
     clearTimeout(timers.get(key));
@@ -178,17 +177,6 @@ export const createCommentProvider = (
       return;
     }
     const uri = editor.document.uri;
-    // VS Code gives no event when an empty draft box is cancelled; a collapsed empty draft is
-    // the footprint it leaves, so drop those. A draft still open (being typed in) stays.
-    for (const [draftId, draft] of drafts) {
-      if (
-        draft.uri.toString() === uri.toString() &&
-        draft.comments.length === 0 &&
-        draft.collapsibleState === vscode.CommentThreadCollapsibleState.Collapsed
-      ) {
-        dropDraft(draftId);
-      }
-    }
     const info = storeFor(uri);
     if (!info) {
       return;
@@ -327,6 +315,9 @@ export const createCommentProvider = (
       vscode.commands.registerCommand("localReview.reopen", (thread: vscode.CommentThread) =>
         operate(thread, (s, f, id) => s.reopen(f, id)),
       ),
+      vscode.commands.registerCommand("localReview.add", (reply: vscode.CommentReply) =>
+        submitReply(reply),
+      ),
       vscode.commands.registerCommand("localReview.reply", (reply: vscode.CommentReply) =>
         submitReply(reply),
       ),
@@ -351,6 +342,7 @@ export const createCommentProvider = (
     folderWatcher,
     vscode.workspace.onDidCloseTextDocument((document) => forget(document.uri.toString())),
     vscode.workspace.onDidChangeWorkspaceFolders((event) => {
+      resolved.clear();
       for (const folder of event.removed) {
         if (fallbackRoots.delete(folder.uri.fsPath)) {
           stores.delete(folder.uri.fsPath);
@@ -421,7 +413,10 @@ export const createCommentProvider = (
       void vscode.window.showWarningMessage(`Failed to update the ignore rules: ${error}`);
     }
   };
-  const startCommentAtLine = async (uri: vscode.Uri, line: number) => {
+  // Hands over to VS Code's own add-comment command, the one behind the gutter "+". It asks the
+  // commenting range provider for the line, opens an empty reply box under it and puts the
+  // keyboard in it. Typing and submitting there reaches localReview.add, which writes the comment.
+  const startCommentAtLine = async (uri: vscode.Uri) => {
     const editor = vscode.window.activeTextEditor;
     if (uri.scheme === "git" || uri.scheme === "diff") {
       void vscode.window.showWarningMessage(
@@ -429,8 +424,7 @@ export const createCommentProvider = (
       );
       return;
     }
-    const info = storeFor(uri);
-    if (!info || !editor) {
+    if (!resolveFor(uri) || !editor) {
       void vscode.window.showWarningMessage(
         !editor
           ? NO_EDITOR
@@ -444,26 +438,20 @@ export const createCommentProvider = (
       );
       return;
     }
-    const key = draftKey(uri, line);
-    const existing = drafts.get(key);
-    if (existing) {
-      existing.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+    await vscode.commands.executeCommand("workbench.action.addComment");
+  };
+  // Template threads (the empty box VS Code opens) already stored; a repeated submit of one is
+  // ignored.
+  const submitted = new WeakSet<vscode.CommentThread>();
+  // A comment typed into the empty box VS Code opens (from the shortcut or the gutter "+")
+  // becomes a stored thread.
+  const submitTemplate = async (thread: vscode.CommentThread, typed: string) => {
+    if (submitted.has(thread)) {
       return;
     }
-    // VS Code shows the empty, replyable thread as an inline box under the line; typing and
-    // submitting there reaches localReview.reply, which writes the comment.
-    const draft = controller.createCommentThread(uri, new vscode.Range(line, 0, line, 0), []);
-    draft.canReply = true;
-    draft.label = "Local Review";
-    draft.contextValue = DRAFT;
-    draft.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
-    drafts.set(key, draft);
-  };
-  // A comment typed into a draft box (ours, or the empty thread VS Code makes for the gutter
-  // "+") becomes a stored thread; anything else is a reply to a stored thread.
-  const submitDraft = async (thread: vscode.CommentThread, typed: string) => {
     const text = typed.trim();
     if (!text) {
+      void vscode.window.showInformationMessage("Empty comment not saved.");
       return;
     }
     const uri = thread.uri;
@@ -486,16 +474,12 @@ export const createCommentProvider = (
       await keepText(error, text);
       return;
     }
+    submitted.add(thread);
     thread.dispose();
-    for (const [draftId, draft] of drafts) {
-      if (draft === thread) {
-        drafts.delete(draftId);
-      }
-    }
+    refreshForEditor(editor);
     if (first) {
       await offerIgnore(info.root);
     }
-    refreshForEditor(editor);
     if (vscode.workspace.getConfiguration("localReview").get<boolean>("copyOnComment", false)) {
       await copyToClipboard(
         formatStandardComment({
@@ -508,8 +492,8 @@ export const createCommentProvider = (
   };
   const submitReply = async (reply: vscode.CommentReply) => {
     const { thread } = reply;
-    if (thread.contextValue === undefined || thread.contextValue === DRAFT) {
-      await submitDraft(thread, reply.text);
+    if (thread.contextValue === undefined) {
+      await submitTemplate(thread, reply.text);
       return;
     }
     operate(thread, (s, f, id) => s.reply(f, id, "user", reply.text), reply.text);
@@ -518,9 +502,7 @@ export const createCommentProvider = (
     for (const key of threads.keys()) {
       clear(key);
     }
-    for (const draftId of [...drafts.keys()]) {
-      dropDraft(draftId);
-    }
+    resolved.clear();
     snapshots.clear();
     for (const timer of timers.values()) {
       clearTimeout(timer);
