@@ -35,7 +35,7 @@ test("a ~/git file with no workspace folder saves to <repo>/.local-review/<rel>.
       const file = path.join(repo, ".local-review", "src", "a.ts.review.json");
       assert.ok(fs.existsSync(file));
       assert.deepEqual(warnings, []);
-      assert.equal(created.length, 1);
+      assert.equal(created.length, 2);
       assert.deepEqual(provider.roots(), [repo]);
     },
     { input: "fix this" },
@@ -83,9 +83,9 @@ test("reply and resolve work on a thread in a ~/git root with no workspace folde
     async ({ repo, provider, editor, created, commands }) => {
       await provider.startCommentAtLine(editor.document.uri, 0);
       const file = path.join(repo, ".local-review", "src", "a.ts.review.json");
-      const thread = created[0];
+      const thread = created[1];
       assert.match(thread.contextValue, /^localReviewThread:open:/);
-      commands["localReview.reply"]({ thread, text: "second" });
+      await commands["localReview.reply"]({ thread, text: "second" });
       let data = JSON.parse(fs.readFileSync(file, "utf8"));
       assert.deepEqual(
         data.threads[0].comments.map((c) => [c.author, c.body]),

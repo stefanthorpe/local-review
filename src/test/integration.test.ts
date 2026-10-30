@@ -78,7 +78,6 @@ suite("Review watcher", () => {
       {
         subscriptions,
       } as unknown as vscode.ExtensionContext,
-      async () => ({ text: "self" }),
       async () => true,
       controller,
       false,
@@ -92,12 +91,26 @@ suite("Review watcher", () => {
     if (stopped) {
       return;
     }
+    // Starting a comment opens an empty inline draft box and writes nothing.
     assert.strictEqual(renders, 1);
+    const draft = rendered!;
+    assert.strictEqual(draft.comments.length, 0);
+    assert.strictEqual(draft.canReply, true);
+    assert.strictEqual(draft.collapsibleState, vscode.CommentThreadCollapsibleState.Expanded);
+    assert.strictEqual(store.listForFile(name).length, 0);
+    await provider.submitReply({ thread: draft, text: "self" });
+    if (stopped) {
+      return;
+    }
+    // Submitting stores the thread, replaces the draft and renders the stored thread once.
+    assert.strictEqual(store.listForFile(name).length, 1);
+    assert.strictEqual(disposals, 1);
+    assert.strictEqual(renders, 2);
     await new Promise((resolve) => setTimeout(resolve, 1000));
     if (stopped) {
       return;
     }
-    assert.strictEqual(renders, 1);
+    assert.strictEqual(renders, 2);
     const item = store.listForFile(name)[0];
     store.reply(name, item.id, "agent", "external reply");
     const deadline = Date.now() + 5000;
@@ -107,7 +120,7 @@ suite("Review watcher", () => {
         return;
       }
     }
-    assert.strictEqual(renders, 1);
+    assert.strictEqual(renders, 2);
     assert.ok(rendered);
     assert.strictEqual(rendered.comments.length, 2);
     assert.strictEqual(
@@ -120,7 +133,40 @@ suite("Review watcher", () => {
     await vscode.workspace.applyEdit(edit);
     await new Promise((resolve) => setTimeout(resolve, 500));
     assert.strictEqual(rendered, original);
-    assert.strictEqual(disposals, 0);
+    assert.strictEqual(disposals, 1);
+  });
+});
+
+suite("Gutter comment ranges", () => {
+  test("a saved workspace file gets the whole document; an untitled one gets none", async function () {
+    this.timeout(15000);
+    const root = vscode.workspace.workspaceFolders![0].uri.fsPath;
+    const dir = fs.mkdtempSync(path.join(root, "gutter-test-"));
+    const source = path.join(dir, "source.txt");
+    const controller = {
+      dispose() {},
+    } as unknown as vscode.CommentController;
+    const provider = createCommentProvider(
+      { subscriptions: [] } as unknown as vscode.ExtensionContext,
+      async () => true,
+      controller,
+      false,
+    );
+    try {
+      fs.writeFileSync(source, "one\ntwo\nthree\n");
+      const saved = await vscode.workspace.openTextDocument(source);
+      const token = new vscode.CancellationTokenSource().token;
+      const ranges = controller.commentingRangeProvider!.provideCommentingRanges(saved, token);
+      assert.deepStrictEqual(ranges, [new vscode.Range(0, 0, saved.lineCount - 1, 0)]);
+      const untitled = await vscode.workspace.openTextDocument({ content: "x\n" });
+      assert.strictEqual(
+        controller.commentingRangeProvider!.provideCommentingRanges(untitled, token),
+        undefined,
+      );
+    } finally {
+      provider.dispose();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

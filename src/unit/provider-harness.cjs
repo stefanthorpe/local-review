@@ -1,3 +1,4 @@
+const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -42,6 +43,7 @@ const withProvider = async (body, options = {}) => {
   const clipboard = [];
   const created = [];
   const prompts = [];
+  const inputBoxes = [];
   const workspaceFolders = options.noWorkspace
     ? []
     : [{ name: path.basename(root), uri: { scheme: "file", fsPath: root } }];
@@ -58,6 +60,7 @@ const withProvider = async (body, options = {}) => {
       },
       getWorkspaceFolder: () =>
         options.noWorkspace ? undefined : { uri: { scheme: "file", fsPath: root } },
+      asRelativePath: (u) => path.relative(root, u.fsPath),
       createFileSystemWatcher: () => silent,
       onDidChangeTextDocument: disposable,
       onDidChangeWorkspaceFolders: (f) => {
@@ -68,13 +71,20 @@ const withProvider = async (body, options = {}) => {
         handlers.close = f;
         return disposable();
       },
-      getConfiguration: () => ({ get: (_key, fallback) => fallback }),
+      getConfiguration: () => ({
+        get: (key, fallback) =>
+          key === "copyOnComment" ? (options.copyOnComment ?? fallback) : fallback,
+      }),
     },
     window: {
       visibleTextEditors: [editor],
       activeTextEditor: options.noEditor ? undefined : editor,
       showWarningMessage: (m) => warnings.push(m),
       showErrorMessage: (m) => warnings.push(m),
+      showInputBox: async (o) => {
+        inputBoxes.push(o);
+        return undefined;
+      },
       showInformationMessage: async (message) => {
         prompts.push(message);
         return options.answer;
@@ -88,6 +98,8 @@ const withProvider = async (body, options = {}) => {
     },
     Range: function (...args) {
       this.args = args;
+      this.start = { line: args[0], character: args[1] };
+      this.end = { line: args[2], character: args[3] };
     },
     MarkdownString: function (value) {
       this.value = value;
@@ -103,6 +115,9 @@ const withProvider = async (body, options = {}) => {
         range,
         comments,
         disposed: 0,
+        collapsibleState: undefined,
+        canReply: undefined,
+        contextValue: undefined,
         dispose() {
           this.disposed++;
         },
@@ -124,20 +139,41 @@ const withProvider = async (body, options = {}) => {
     const { FileCommentStore } = require(OUT + "file-store");
     provider = createCommentProvider(
       { subscriptions: [] },
-      async () => (options.input ? { text: options.input } : undefined),
       async (text) => {
         clipboard.push(text);
         return options.copyOk ?? true;
       },
       controller,
-      options.registerCommands ?? false,
+      options.registerCommands ?? true,
     );
+    // Types `text` into the newest live draft box, as the user would, and submits it.
+    const type = async (text) => {
+      const draft = created
+        .filter((t) => !t.disposed && t.contextValue === "localReviewDraft")
+        .at(-1);
+      assert.ok(draft, "no draft box is open");
+      await commands["localReview.reply"]({ thread: draft, text });
+    };
+    if (options.input !== undefined) {
+      // `input` simulates the user typing that text into the inline box each time one opens.
+      const open = provider.startCommentAtLine;
+      provider.startCommentAtLine = async (...args) => {
+        const before = created.filter((t) => !t.disposed).length;
+        await open(...args);
+        if (created.filter((t) => !t.disposed).length > before) {
+          await type(options.input);
+        }
+      };
+    }
     await body({
       root,
       editor,
       provider,
       handlers,
       commands,
+      controller,
+      inputBoxes,
+      type,
       warnings,
       clipboard,
       created,
