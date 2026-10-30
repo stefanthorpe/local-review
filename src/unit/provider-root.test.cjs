@@ -31,7 +31,7 @@ const withRepo = async (body, options = {}) => {
 test("a ~/git file with no workspace folder saves to <repo>/.local-review/<rel>.review.json", async () => {
   await withRepo(
     async ({ repo, provider, editor, created, warnings }) => {
-      await provider.startCommentAtLine(editor.document.uri, 0);
+      await provider.startComment(editor.document.uri);
       const file = path.join(repo, ".local-review", "src", "a.ts.review.json");
       assert.ok(fs.existsSync(file));
       assert.deepEqual(warnings, []);
@@ -47,7 +47,7 @@ test("a file outside ~/git and every workspace folder is refused with the genera
   try {
     await withProvider(
       async ({ provider, editor, warnings }) => {
-        await provider.startCommentAtLine(editor.document.uri, 0);
+        await provider.startComment(editor.document.uri);
         assert.deepEqual(warnings, [
           "Comments are only saved for files in a git repository under ~/git, or under the open folder.",
         ]);
@@ -81,7 +81,7 @@ test("an external edit of a review file in a root outside the workspace refreshe
 test("reply and resolve work on a thread in a ~/git root with no workspace folder", async () => {
   await withRepo(
     async ({ repo, provider, editor, created, commands }) => {
-      await provider.startCommentAtLine(editor.document.uri, 0);
+      await provider.startComment(editor.document.uri);
       const file = path.join(repo, ".local-review", "src", "a.ts.review.json");
       const thread = created[1];
       assert.match(thread.contextValue, /^localReviewThread:open:/);

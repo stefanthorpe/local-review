@@ -45,7 +45,7 @@ const withRealRepo = async (body, options = {}) => {
 test("a repo that already ignores .local-review/ gets no prompt", async () => {
   await withRealRepo(async ({ repo, provider, editor, prompts }) => {
     fs.writeFileSync(path.join(repo, ".gitignore"), ".local-review/\n");
-    await provider.startCommentAtLine(editor.document.uri, 0);
+    await provider.startComment(editor.document.uri);
     assert.deepEqual(prompts, []);
   });
 });
@@ -53,7 +53,7 @@ test("a repo that already ignores .local-review/ gets no prompt", async () => {
 test("an unignored repo is asked by name and Add writes the private exclude, not .gitignore", async () => {
   await withRealRepo(
     async ({ repo, provider, editor, prompts, warnings }) => {
-      await provider.startCommentAtLine(editor.document.uri, 0);
+      await provider.startComment(editor.document.uri);
       assert.deepEqual(prompts, ["Ignore .local-review/ in repo?"]);
       assert.deepEqual(warnings, []);
       assert.equal(
@@ -71,7 +71,7 @@ test("an unignored repo is asked by name and Add writes the private exclude, not
 
 test("declining the prompt writes nothing", async () => {
   await withRealRepo(async ({ repo, provider, editor, prompts }) => {
-    await provider.startCommentAtLine(editor.document.uri, 0);
+    await provider.startComment(editor.document.uri);
     assert.equal(prompts.length, 1);
     assert.equal(fs.existsSync(path.join(repo, ".gitignore")), false);
     assert.doesNotMatch(
@@ -96,7 +96,7 @@ test("a worktree writes the exclude into the common git dir", async () => {
     await withHome(home, () =>
       withProvider(
         async ({ provider, editor, prompts }) => {
-          await provider.startCommentAtLine(editor.document.uri, 0);
+          await provider.startComment(editor.document.uri);
           assert.deepEqual(prompts, ["Ignore .local-review/ in wt?"]);
           assert.match(
             fs.readFileSync(path.join(main, ".git", "info", "exclude"), "utf8"),
@@ -115,7 +115,7 @@ test("a worktree writes the exclude into the common git dir", async () => {
 test("a folder with no repository keeps the .gitignore route and names the folder", async () => {
   await withProvider(
     async ({ root, provider, editor, prompts }) => {
-      await provider.startCommentAtLine(editor.document.uri, 0);
+      await provider.startComment(editor.document.uri);
       assert.deepEqual(prompts, [`Add .local-review/ to .gitignore in ${path.basename(root)}?`]);
       assert.match(fs.readFileSync(path.join(root, ".gitignore"), "utf8"), /^\.local-review\/$/m);
     },
@@ -131,7 +131,7 @@ test("a symlinked exclude file is refused and the link target is untouched", asy
       fs.mkdirSync(path.join(repo, ".git", "info"), { recursive: true });
       fs.rmSync(path.join(repo, ".git", "info", "exclude"), { force: true });
       fs.symlinkSync(target, path.join(repo, ".git", "info", "exclude"));
-      await provider.startCommentAtLine(editor.document.uri, 0);
+      await provider.startComment(editor.document.uri);
       assert.equal(fs.readFileSync(target, "utf8"), "keep\n");
       assert.equal(warnings.length, 1);
       assert.match(warnings[0], /Failed to update the ignore rules/);
@@ -151,7 +151,7 @@ test("a workspace folder inside a repo (no .git entry of its own) uses the repo'
     await withHome(home, () =>
       withProvider(
         async ({ provider, editor, prompts, warnings }) => {
-          await provider.startCommentAtLine(editor.document.uri, 0);
+          await provider.startComment(editor.document.uri);
           assert.deepEqual(prompts, ["Ignore .local-review/ in sub?"]);
           assert.deepEqual(warnings, []);
           assert.match(
@@ -181,7 +181,7 @@ test("an already ignored folder inside a repo gets no prompt", async () => {
     await withHome(home, () =>
       withProvider(
         async ({ provider, editor, prompts }) => {
-          await provider.startCommentAtLine(editor.document.uri, 0);
+          await provider.startComment(editor.document.uri);
           assert.deepEqual(prompts, []);
         },
         { root: sub, filePath: path.join(sub, "a.ts"), input: "x", answer: "Add" },
@@ -199,7 +199,7 @@ test("a missing git gives no prompt and writes nothing", async () => {
       const empty = fs.mkdtempSync(path.join(os.tmpdir(), "provider-nogit-"));
       process.env.PATH = empty;
       try {
-        await provider.startCommentAtLine(editor.document.uri, 0);
+        await provider.startComment(editor.document.uri);
       } finally {
         process.env.PATH = saved;
         fs.rmSync(empty, { recursive: true, force: true });
@@ -251,7 +251,7 @@ for (const otherName of [["other"], ["elsewhere", ".git"]]) {
         home,
         otherName,
         async ({ provider, editor, prompts, warnings }) => {
-          await provider.startCommentAtLine(editor.document.uri, 0);
+          await provider.startComment(editor.document.uri);
           seen.push(prompts, warnings);
         },
       );
@@ -282,7 +282,7 @@ for (const [label, plantGit] of [
       await withHome(home, () =>
         withProvider(
           async ({ provider, editor, prompts }) => {
-            await provider.startCommentAtLine(editor.document.uri, 0);
+            await provider.startComment(editor.document.uri);
             seen.push(prompts);
           },
           { filePath: path.join(broken, "a.ts"), noWorkspace: true, input: "x", answer: "Add" },
@@ -308,7 +308,7 @@ test("a folder with no .git whose parent has a broken .git file gets no prompt a
     await withHome(home, () =>
       withProvider(
         async ({ provider, editor, prompts }) => {
-          await provider.startCommentAtLine(editor.document.uri, 0);
+          await provider.startComment(editor.document.uri);
           seen.push(prompts);
         },
         { root: child, filePath: path.join(child, "a.ts"), input: "x", answer: "Add" },

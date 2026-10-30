@@ -11,7 +11,7 @@ import { getEditorFileName } from "../../editor/utils/detector";
 import { formatStandardComment } from "./format";
 
 export interface CommentProvider {
-  startCommentAtLine(uri: vscode.Uri): Promise<void>;
+  startComment(uri: vscode.Uri): Promise<void>;
   submitReply(reply: vscode.CommentReply): Promise<void>;
   refreshForEditor(editor?: vscode.TextEditor): void;
   clearAllThreads(): void;
@@ -416,7 +416,7 @@ export const createCommentProvider = (
   // Hands over to VS Code's own add-comment command, the one behind the gutter "+". It asks the
   // commenting range provider for the line, opens an empty reply box under it and puts the
   // keyboard in it. Typing and submitting there reaches localReview.add, which writes the comment.
-  const startCommentAtLine = async (uri: vscode.Uri) => {
+  const startComment = async (uri: vscode.Uri) => {
     const editor = vscode.window.activeTextEditor;
     if (uri.scheme === "git" || uri.scheme === "diff") {
       void vscode.window.showWarningMessage(
@@ -516,7 +516,7 @@ export const createCommentProvider = (
     dirWatchers.clear();
   };
   return {
-    startCommentAtLine,
+    startComment,
     submitReply,
     refreshForEditor,
     clearAllThreads,

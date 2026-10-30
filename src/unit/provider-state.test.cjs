@@ -17,7 +17,7 @@ const withHomeDir = async (body) => {
 test("only an untitled document is told to save first", async () => {
   await withProvider(
     async ({ provider, editor, warnings }) => {
-      await provider.startCommentAtLine({ ...editor.document.uri, scheme: "untitled" }, 0);
+      await provider.startComment({ ...editor.document.uri, scheme: "untitled" });
       assert.deepEqual(warnings, ["Save the file first; comments are stored next to saved files."]);
     },
     { input: "x" },
@@ -27,7 +27,7 @@ test("only an untitled document is told to save first", async () => {
 test("no active editor asks to open the file in an editor", async () => {
   await withProvider(
     async ({ provider, editor, warnings }) => {
-      await provider.startCommentAtLine(editor.document.uri, 0);
+      await provider.startComment(editor.document.uri);
       assert.deepEqual(warnings, ["Open the file in an editor to comment on it."]);
     },
     { input: "x", noEditor: true },
@@ -37,7 +37,7 @@ test("no active editor asks to open the file in an editor", async () => {
 test("a non-file, non-untitled scheme says comments are for files on this machine", async () => {
   await withProvider(
     async ({ provider, editor, warnings }) => {
-      await provider.startCommentAtLine({ ...editor.document.uri, scheme: "vscode-remote" }, 0);
+      await provider.startComment({ ...editor.document.uri, scheme: "vscode-remote" });
       assert.deepEqual(warnings, ["Comments can only be saved for files on this machine."]);
     },
     { input: "x" },
@@ -51,7 +51,7 @@ test("a ~/git file in no repository and outside the workspace gets the repositor
     fs.writeFileSync(file, "x\n");
     await withProvider(
       async ({ provider, editor, warnings }) => {
-        await provider.startCommentAtLine(editor.document.uri, 0);
+        await provider.startComment(editor.document.uri);
         assert.deepEqual(warnings, [
           "Comments are saved in the git repository that holds the file; this file under ~/git is not in one.",
         ]);
@@ -64,7 +64,7 @@ test("a ~/git file in no repository and outside the workspace gets the repositor
 test("removing a workspace folder drops its fallback root but keeps repo roots", async () => {
   await withProvider(
     async ({ root, provider, editor, handlers }) => {
-      await provider.startCommentAtLine(editor.document.uri, 0);
+      await provider.startComment(editor.document.uri);
       assert.deepEqual(provider.roots(), [root]);
       handlers.folders({ removed: [{ uri: { scheme: "file", fsPath: root } }] });
       assert.deepEqual(provider.roots(), []);
@@ -74,7 +74,7 @@ test("removing a workspace folder drops its fallback root but keeps repo roots",
   await withProvider(
     async ({ root, provider, editor, handlers }) => {
       fs.mkdirSync(path.join(root, ".git"));
-      await provider.startCommentAtLine(editor.document.uri, 0);
+      await provider.startComment(editor.document.uri);
       handlers.folders({ removed: [{ uri: { scheme: "file", fsPath: root } }] });
       assert.deepEqual(provider.roots(), [root]);
     },
@@ -85,7 +85,7 @@ test("removing a workspace folder drops its fallback root but keeps repo roots",
 test("Copy All no longer lists a closed folder's fallback root", async () => {
   await withProvider(
     async ({ root, provider, editor, handlers, workspaceFolders, submit, clipboard, warnings }) => {
-      await provider.startCommentAtLine(editor.document.uri, 0);
+      await provider.startComment(editor.document.uri);
       await submit();
       assert.equal(clipboard.length, 1);
       assert.match(clipboard[0], /x/);

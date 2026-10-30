@@ -1,27 +1,5 @@
 import * as vscode from "vscode";
 
-interface DiffEditorInfo {
-  fileName: string;
-  lineNumber: number;
-  isDiffEditor: boolean;
-}
-
-export const getCurrentLineInfo = (): DiffEditorInfo | null => {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor) {
-    return null;
-  }
-
-  const position = editor.selection.active;
-  const lineNumber = position.line;
-
-  return {
-    fileName: getEditorFileName(editor),
-    lineNumber,
-    isDiffEditor: isDiffEditor(editor),
-  };
-};
-
 export const getEditorFileName = (editor: vscode.TextEditor): string => {
   const uri = editor.document.uri;
   const config = vscode.workspace.getConfiguration("localReview");

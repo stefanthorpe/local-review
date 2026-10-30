@@ -107,7 +107,7 @@ test("provider preserves threads, deduplicates warnings, handles colon ids and f
     const thread = created[0];
     const diff = { ...document, uri: { ...uri, scheme: "git" } };
     provider.refreshForEditor({ document: diff });
-    await provider.startCommentAtLine(diff.uri, 0);
+    await provider.startComment(diff.uri);
     assert.equal(created.length, 1);
     warnings.length = 0;
     document.lineAt = () => ({ text: "changed" });

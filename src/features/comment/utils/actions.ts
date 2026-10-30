@@ -16,7 +16,7 @@ export const addComment: CommentAction = async (ctx) => {
     return;
   }
 
-  await ctx.commentProvider.startCommentAtLine(editor.document.uri);
+  await ctx.commentProvider.startComment(editor.document.uri);
 };
 
 const MAX_SOURCE_BYTES = 5 * 1024 * 1024;

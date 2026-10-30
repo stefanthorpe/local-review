@@ -45,7 +45,6 @@ const withProvider = async (body, options = {}) => {
   const clipboard = [];
   const created = [];
   const prompts = [];
-  const inputBoxes = [];
   const workspaceFolders = options.noWorkspace
     ? []
     : [{ name: path.basename(root), uri: { scheme: "file", fsPath: root } }];
@@ -85,10 +84,6 @@ const withProvider = async (body, options = {}) => {
       activeTextEditor: options.noEditor ? undefined : editor,
       showWarningMessage: (m) => warnings.push(m),
       showErrorMessage: (m) => warnings.push(m),
-      showInputBox: async (o) => {
-        inputBoxes.push(o);
-        return undefined;
-      },
       showInformationMessage: async (message) => {
         prompts.push(message);
         options.onPrompt?.(message, created);
@@ -176,8 +171,8 @@ const withProvider = async (body, options = {}) => {
     };
     if (options.input !== undefined) {
       // `input` simulates the user typing that text into the inline box each time one opens.
-      const open = provider.startCommentAtLine;
-      provider.startCommentAtLine = async (...args) => {
+      const open = provider.startComment;
+      provider.startComment = async (...args) => {
         const before = created.filter((t) => !t.disposed).length;
         await open(...args);
         if (created.filter((t) => !t.disposed).length > before) {
@@ -192,7 +187,6 @@ const withProvider = async (body, options = {}) => {
       handlers,
       commands,
       controller,
-      inputBoxes,
       type,
       executed,
       folderLookups,

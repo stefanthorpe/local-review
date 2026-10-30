@@ -11,36 +11,33 @@ const stored = (created) => live(created).filter((t) => /^localReviewThread:/.te
 const ADD = "workbench.action.addComment";
 
 test("starting a comment hands over to VS Code's add-comment command and creates no thread itself", async () => {
-  await withProvider(
-    async ({ editor, provider, created, executed, inputBoxes, store, warnings }) => {
-      editor.document.lineCount = 5;
-      editor.selection.active.line = 3;
-      await provider.startCommentAtLine(editor.document.uri);
-      assert.deepEqual(executed, [ADD]);
-      // The one thread is the template VS Code makes; the provider adds nothing of its own.
-      assert.equal(created.length, 1);
-      assert.equal(created[0].range.start.line, 3);
-      assert.equal(created[0].contextValue, undefined);
-      assert.deepEqual(inputBoxes, []);
-      assert.deepEqual(warnings, []);
-      assert.equal(store.listForFile("sub/a").length, 0);
-    },
-  );
+  await withProvider(async ({ editor, provider, created, executed, store, warnings }) => {
+    editor.document.lineCount = 5;
+    editor.selection.active.line = 3;
+    await provider.startComment(editor.document.uri);
+    assert.deepEqual(executed, [ADD]);
+    // The one thread is the template VS Code makes; the provider adds nothing of its own.
+    assert.equal(created.length, 1);
+    assert.equal(created[0].range.start.line, 3);
+    assert.equal(created[0].contextValue, undefined);
+    assert.deepEqual(warnings, []);
+    assert.equal(store.listForFile("sub/a").length, 0);
+  });
 });
 
 test("every guard still refuses before the command runs", async () => {
   await withProvider(async ({ editor, provider, executed, warnings }) => {
-    await provider.startCommentAtLine({ ...editor.document.uri, scheme: "git" });
+    await provider.startComment({ ...editor.document.uri, scheme: "git" });
     assert.match(warnings[0], /read-only/);
-    await provider.startCommentAtLine({ ...editor.document.uri, scheme: "diff" });
-    await provider.startCommentAtLine({ ...editor.document.uri, scheme: "untitled" });
-    await provider.startCommentAtLine({ ...editor.document.uri, scheme: "vscode-remote" });
+    await provider.startComment({ ...editor.document.uri, scheme: "diff" });
+    await provider.startComment({ ...editor.document.uri, scheme: "untitled" });
+    await provider.startComment({ ...editor.document.uri, scheme: "vscode-remote" });
     assert.equal(warnings.length, 4);
     assert.deepEqual(executed, []);
   });
   await withProvider(
     async ({ editor, provider, executed, warnings }) => {
-      await provider.startCommentAtLine(editor.document.uri);
+      await provider.startComment(editor.document.uri);
       assert.equal(warnings.length, 1);
       assert.deepEqual(executed, []);
     },
@@ -53,7 +50,7 @@ test("submitting text in the template box stores one thread and clears the box",
     editor.document.lineCount = 5;
     editor.document.lineAt = (i) => ({ text: `text ${i}` });
     editor.selection.active.line = 3;
-    await provider.startCommentAtLine(editor.document.uri);
+    await provider.startComment(editor.document.uri);
     const box = created[0];
     await type("  fix this  ");
     const threads = store.listForFile("sub/a");
@@ -72,7 +69,7 @@ test("submitting text in the template box stores one thread and clears the box",
 
 test("a second submit of the same box stores nothing more", async () => {
   await withProvider(async ({ editor, provider, created, commands, store }) => {
-    await provider.startCommentAtLine(editor.document.uri);
+    await provider.startComment(editor.document.uri);
     const box = created[0];
     await commands["localReview.reply"]({ thread: box, text: "once" });
     await commands["localReview.reply"]({ thread: box, text: "once" });
@@ -86,7 +83,7 @@ test("a second submit of the same box stores nothing more", async () => {
 
 test("two submits racing on one box store one thread", async () => {
   await withProvider(async ({ editor, provider, created, store }) => {
-    await provider.startCommentAtLine(editor.document.uri);
+    await provider.startComment(editor.document.uri);
     const box = created[0];
     await Promise.all([
       provider.submitReply({ thread: box, text: "race" }),
@@ -98,7 +95,7 @@ test("two submits racing on one box store one thread", async () => {
 
 test("an empty or whitespace submit says so, writes nothing and leaves the box", async () => {
   await withProvider(async ({ editor, provider, created, store, type, root, prompts }) => {
-    await provider.startCommentAtLine(editor.document.uri);
+    await provider.startComment(editor.document.uri);
     await type("");
     await type(" \n\t ");
     assert.deepEqual(prompts, ["Empty comment not saved.", "Empty comment not saved."]);
@@ -115,7 +112,7 @@ test("the stored comment renders before the first-use ignore prompt is answered"
   let renderedAtPrompt;
   await withProvider(
     async ({ editor, provider, created, type }) => {
-      await provider.startCommentAtLine(editor.document.uri);
+      await provider.startComment(editor.document.uri);
       await type("show me");
       assert.equal(renderedAtPrompt, 1);
       assert.equal(stored(created).length, 1);
@@ -153,7 +150,7 @@ test("a thread VS Code made from the gutter plus is stored on submit", async () 
 
 test("replying to a stored thread still appends to it", async () => {
   await withProvider(async ({ editor, provider, created, commands, store, type }) => {
-    await provider.startCommentAtLine(editor.document.uri);
+    await provider.startComment(editor.document.uri);
     await type("first");
     const thread = stored(created)[0];
     await commands["localReview.reply"]({ thread, text: "second" });
@@ -169,7 +166,7 @@ test("replying to a stored thread still appends to it", async () => {
 test("copyOnComment copies the submitted comment", async () => {
   await withProvider(
     async ({ editor, provider, clipboard, type }) => {
-      await provider.startCommentAtLine(editor.document.uri);
+      await provider.startComment(editor.document.uri);
       assert.deepEqual(clipboard, []);
       await type("copy me");
       assert.equal(clipboard.length, 1);
@@ -178,7 +175,7 @@ test("copyOnComment copies the submitted comment", async () => {
     { copyOnComment: true },
   );
   await withProvider(async ({ editor, provider, clipboard, type }) => {
-    await provider.startCommentAtLine(editor.document.uri);
+    await provider.startComment(editor.document.uri);
     await type("do not copy");
     assert.deepEqual(clipboard, []);
   });
@@ -191,7 +188,7 @@ test("a refused write keeps the text on the clipboard and leaves the box open fo
     const data = JSON.parse(fs.readFileSync(file, "utf8"));
     data.threads[0].id = "bad id";
     fs.writeFileSync(file, JSON.stringify(data));
-    await provider.startCommentAtLine(editor.document.uri);
+    await provider.startComment(editor.document.uri);
     await type("my typed comment");
     assert.equal(warnings.length, 1);
     assert.match(warnings[0], /my typed comment/);
