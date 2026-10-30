@@ -216,7 +216,7 @@ test("extension identity and defaults distinguish the fork", () => {
   const manifest = require("../../package.json");
   assert.equal(manifest.publisher, "stefanthorpe");
   assert.equal(manifest.name, "local-review");
-  assert.equal(manifest.version, "0.1.1");
+  assert.equal(manifest.version, "0.1.2");
   assert.equal(manifest.displayName, "Local Review (file-backed)");
   assert.equal(
     manifest.contributes.configuration.properties["localReview.copyOnComment"].default,

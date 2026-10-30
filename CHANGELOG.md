@@ -2,6 +2,12 @@
 
 All notable changes to this extension are listed here.
 
+## [0.1.2]
+
+- Add a comment by typing in place: `Ctrl+Shift+C` (or the editor menu) opens an inline box under the line instead of an input at the top of the window.
+- The gutter `+` now adds a comment on any line of a file that can store comments.
+- An empty submit writes nothing, and a collapsed empty draft is cleaned up.
+
 ## [0.1.1]
 
 - Copy All finds repos under `~/git` and under the open folders by searching for `.local-review`, instead of remembering roots between sessions.
